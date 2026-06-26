@@ -48,12 +48,16 @@ def trace_mask(mask: np.ndarray) -> str:
     """0/255 掩膜(主体=255) → 平滑矢量路径 d(局部像素坐标)；空掩膜返回 ""。"""
     if cv2.countNonZero(mask) == 0:
         return ""
-    with tempfile.TemporaryDirectory() as td:
-        bmp = os.path.join(td, "m.bmp")
-        # potrace 以黑为前景：取反让主体(255)变黑被描出，否则描的是背景
-        cv2.imwrite(bmp, cv2.bitwise_not(mask))
-        svg = _run_potrace_svg(bmp)
-    return _svg_to_local_d(svg)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            bmp = os.path.join(td, "m.bmp")
+            # potrace 以黑为前景：取反让主体(255)变黑被描出，否则描的是背景
+            cv2.imwrite(bmp, cv2.bitwise_not(mask))
+            svg = _run_potrace_svg(bmp)
+        return _svg_to_local_d(svg)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
+        print(f"[vectorize] 警告: potrace 调用失败({e})，回退到像素轮廓")
+        return ""
 
 
 def path_to_polylines(d: str, step_px: float = 3.0) -> list[list[tuple[float, float]]]:

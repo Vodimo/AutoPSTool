@@ -43,3 +43,11 @@ def test_traced_bbox_matches_subject_not_inverse():
 
 def test_empty_mask_returns_empty():
     assert vz.trace_mask(np.zeros((50, 50), np.uint8)) == ""
+
+
+def test_trace_mask_degrades_on_potrace_failure(monkeypatch):
+    """potrace 不可用时 trace_mask 返回 ""，让上层回退到像素轮廓而非崩溃。"""
+    monkeypatch.setattr(vz, "POTRACE_EXE", r"C:\__nonexistent__\potrace.exe")
+    m = np.zeros((80, 80), np.uint8)
+    cv2.circle(m, (40, 40), 25, 255, -1)
+    assert vz.trace_mask(m) == ""
