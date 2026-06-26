@@ -1,0 +1,26 @@
+# 项目内 conda 环境
+.conda/
+.venv/
+venv/
+env/
+
+# 供 potrace 从源码构建的 MSYS2 工具链（非项目源码）
+tools/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 运行产物
+output/
+*.pdf
+
+# rembg 模型缓存（如落到项目内）
+*.onnx
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
