@@ -20,13 +20,6 @@ def part_polygon(part):
     return shapely.affinity.translate(poly, part.x, part.y)
 
 
-def _local_polygon(part):
-    """零件在自身局部、已缩放、左上角对齐到 (0,0) 的多边形。"""
-    poly = _scaled_polygon(part)
-    minx, miny, _, _ = poly.bounds
-    return shapely.affinity.translate(poly, -minx, -miny)
-
-
 def nest(parts, padding_mm=None, grid_step=20):
     """原地排版，设置每个 part 的 x/y。放不下的标记 x=y=-1。"""
     if padding_mm is None:
@@ -34,12 +27,15 @@ def nest(parts, padding_mm=None, grid_step=20):
     padding_px = g.mm_to_px(padding_mm)
 
     board = shapely.geometry.box(0, 0, g.A4_WIDTH_PX, g.A4_HEIGHT_PX)
-    items = sorted(parts, key=lambda p: p.image_layer.shape[0] * p.image_layer.shape[1],
+    # Fix 2: 按缩放后面积降序排列，保证大零件优先放置
+    items = sorted(parts,
+                   key=lambda p: p.image_layer.shape[0] * p.image_layer.shape[1] * p.scale * p.scale,
                    reverse=True)
     placed = []
 
     for part in items:
-        local = _local_polygon(part)
+        # Fix 1: 使用原始图像帧的多边形（不重新对齐到零点），保持与 image_layer 贴图的一致性
+        local = _scaled_polygon(part)
         minx, miny, maxx, maxy = local.bounds
         pw, ph = maxx - minx, maxy - miny
         best_x, best_y = -1, -1
@@ -49,7 +45,8 @@ def nest(parts, padding_mm=None, grid_step=20):
             if found:
                 break
             for x in range(0, max(1, int(g.A4_WIDTH_PX - pw)), grid_step):
-                cand = shapely.affinity.translate(local, x, y)
+                # Fix 1: 平移使图像原点落在 (x, y)，与 render_png 的贴图位置对齐
+                cand = shapely.affinity.translate(local, x - minx, y - miny)
                 padded = cand.buffer(padding_px / 2.0, join_style=2)
                 if not padded.within(board):
                     continue

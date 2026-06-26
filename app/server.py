@@ -7,7 +7,7 @@ import webbrowser
 
 import cv2
 import numpy as np
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory, abort
 
 from app import segmentation, part_builder, nesting, exporter
 from app.models import Part
@@ -24,6 +24,8 @@ def _decode_image(b64: str):
     data = base64.b64decode(b64)
     arr = np.frombuffer(data, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # 统一 BGR 3 通道
+    if img is None:
+        abort(400, description="无法解码图像")
     return img
 
 

@@ -41,3 +41,25 @@ def test_nest_simplifies_high_vertex_contour():
     assert len(poly.exterior.coords) < 120   # 顶点大幅减少
     out = nesting.nest([p])
     assert out[0].x >= 0                      # 仍能放下
+
+
+def test_nest_footprint_matches_image_for_build_part():
+    """nest 后，零件碰撞多边形应与其 image_layer 矩形对齐(导出贴图不偏移/不溢出板)。"""
+    import numpy as np, cv2
+    from app import part_builder as pb
+    from app import geometry as g
+    img = np.full((400, 400, 3), 255, np.uint8)
+    cv2.circle(img, (200, 200), 70, (0, 140, 200), -1)
+    mask = np.zeros((400, 400), np.uint8)
+    cv2.circle(mask, (200, 200), 70, 255, -1)
+    part = pb.build_part(img, mask)
+    nesting.nest([part])
+    assert part.x >= 0 and part.y >= 0
+    poly = nesting.part_polygon(part)
+    minx, miny, maxx, maxy = poly.bounds
+    # 碰撞多边形必须落在 image_layer 在(x,y)处占据的矩形内(含少量简化容差)
+    tol = nesting.SIMPLIFY_TOLERANCE_PX + 1
+    assert minx >= part.x - tol and miny >= part.y - tol
+    assert maxx <= part.x + part.w + tol and maxy <= part.y + part.h + tol
+    # 整体在 A4 板内
+    assert maxx <= g.A4_WIDTH_PX and maxy <= g.A4_HEIGHT_PX
