@@ -31,7 +31,12 @@ def _run_potrace_svg(bmp_path: str) -> str:
 def _svg_to_local_d(svg_text: str) -> str:
     """把 potrace SVG(带 translate+scale)的路径折算到零件局部像素坐标，合并为一个 d。"""
     m = _TRANSFORM_RE.search(svg_text)
-    tx, ty, sx, sy = (float(g) for g in m.groups()) if m else (0.0, 0.0, 1.0, 1.0)
+    if m:
+        tx, ty, sx, sy = (float(g) for g in m.groups())
+    else:
+        if "<path" in svg_text:
+            print("[vectorize] 警告: 未能解析 potrace SVG 的 transform，坐标可能不准")
+        tx, ty, sx, sy = (0.0, 0.0, 1.0, 1.0)
     out = []
     for d in _PATH_D_RE.findall(svg_text):
         p = parse_path(d).scaled(sx, sy).translated(complex(tx, ty))
@@ -51,7 +56,7 @@ def trace_mask(mask: np.ndarray) -> str:
     return _svg_to_local_d(svg)
 
 
-def path_to_polylines(d: str, step_px: float = 3.0) -> list:
+def path_to_polylines(d: str, step_px: float = 3.0) -> list[list[tuple[float, float]]]:
     """把矢量路径 d 离散成若干闭合折线([(x,y),...])，供栅格绘制/排版碰撞用。"""
     if not d:
         return []
