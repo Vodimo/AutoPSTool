@@ -1,2 +1,26 @@
-<!doctype html><html><head><meta charset="utf-8"><title>AutoPSTool</title></head>
-<body><p>占位页，Task 10 替换。</p></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoPSTool 刀模排版</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>AutoPSTool</h1>
+    <input type="file" id="file" accept="image/png,image/jpeg" style="display:none">
+    <button id="btn-import">导入图片</button>
+    <button id="btn-cut">切割模式</button>
+    <button id="btn-tidy">整理排版</button>
+    <button id="btn-delete">删除选中</button>
+    <button id="btn-export">导出 PNG</button>
+    <span id="status">就绪</span>
+  </header>
+  <div id="wrap">
+    <canvas id="c" width="630" height="891"></canvas>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
