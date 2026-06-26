@@ -5,6 +5,7 @@ import numpy as np
 
 from app import geometry as g
 from app import cv_helpers as ch
+from app import vectorize as vz
 from app.models import Part
 
 
@@ -51,7 +52,9 @@ def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None) -> Part:
         biggest = max(contours, key=cv2.contourArea)
         contour = [(int(p[0][0]), int(p[0][1])) for p in biggest]
 
-    return Part(id=part_id, image_layer=layer, mask=crop_die, contour=contour)
+    dieline_path = vz.trace_mask(crop_die)
+    return Part(id=part_id, image_layer=layer, mask=crop_die,
+                contour=contour, dieline_path=dieline_path)
 
 
 def _rebuild_from_die(layer_rgba, die_mask, part_id):

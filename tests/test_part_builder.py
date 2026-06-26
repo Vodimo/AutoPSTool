@@ -69,3 +69,10 @@ def test_cut_part_zero_length_line_no_cut():
     a, b = pb.cut_part(part, (midx, 10), (midx, 10), bleed_mm=1.5)
     assert a is part        # 原零件原样返回
     assert b is None        # 没有第二块
+
+
+def test_build_part_has_vector_dieline():
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    assert part.dieline_path                 # 非空
+    assert "C" in part.dieline_path.upper()  # 平滑贝塞尔
