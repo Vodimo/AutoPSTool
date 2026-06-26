@@ -11,7 +11,7 @@ def fill_holes(mask: np.ndarray) -> np.ndarray:
     return out
 
 
-def separate_components(mask: np.ndarray, min_area: int = 200) -> list:
+def separate_components(mask: np.ndarray, min_area: int = 200) -> list[np.ndarray]:
     """连通域分离：每个主体一张同尺寸 0/255 掩膜；过滤面积 < min_area 的噪点。"""
     num_labels, labels = cv2.connectedComponents(mask)
     result = []

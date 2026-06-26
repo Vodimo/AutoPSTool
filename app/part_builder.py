@@ -82,7 +82,10 @@ def cut_part(part, p1, p2, bleed_mm=None):
     x1, y1 = p1
     x2, y2 = p2
     dx, dy = x2 - x1, y2 - y1
-    length = float(np.hypot(dx, dy)) or 1.0
+    length = float(np.hypot(dx, dy))
+    if length < 1.0:
+        # 切割线太短（几乎零长）：无法定义切口方向，原样返回不切，避免切出两份重叠整图
+        return part, None
 
     Y, X = np.indices((h, w))
     # 有向距离：>0 一侧，<0 另一侧

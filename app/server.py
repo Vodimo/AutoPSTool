@@ -29,10 +29,23 @@ def _decode_image(b64: str):
     return img
 
 
+def _require_json(*keys):
+    """取出 JSON 请求体并校验必需字段，缺失则返回 400（而非 500 堆栈）。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        abort(400, description="请求体必须是 JSON 对象")
+    for k in keys:
+        if k not in data:
+            abort(400, description=f"缺少字段: {k}")
+    return data
+
+
 def part_to_dict(part: Part) -> dict:
     """零件图片层编码为 base64 PNG 给前端。"""
     rgba = part.image_layer
     ok, buf = cv2.imencode(".png", cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+    if not ok:
+        raise RuntimeError("零件图片层 PNG 编码失败")
     b64 = base64.b64encode(buf).decode()
     return {
         "id": part.id,
@@ -54,7 +67,8 @@ def static_files(fname):
 
 @app.route("/api/segment", methods=["POST"])
 def api_segment():
-    img = _decode_image(request.json["image_base64"])
+    d = _require_json("image_base64")
+    img = _decode_image(d["image_base64"])
     subjects = segmentation.segment_subjects(img)
     out = []
     for s in subjects:
@@ -66,7 +80,7 @@ def api_segment():
 
 @app.route("/api/cut", methods=["POST"])
 def api_cut():
-    d = request.json
+    d = _require_json("id", "x1", "y1", "x2", "y2")
     part = PARTS.get(d["id"])
     if part is None:
         return jsonify({"error": "part not found"}), 404
@@ -83,7 +97,7 @@ def api_cut():
 
 @app.route("/api/nest", methods=["POST"])
 def api_nest():
-    items = request.json["items"]
+    items = _require_json("items")["items"]
     parts = []
     for it in items:
         p = PARTS.get(it["id"])
@@ -97,7 +111,7 @@ def api_nest():
 
 @app.route("/api/export", methods=["POST"])
 def api_export():
-    items = request.json["items"]
+    items = _require_json("items")["items"]
     parts = []
     for it in items:
         p = PARTS.get(it["id"])

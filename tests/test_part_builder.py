@@ -51,3 +51,21 @@ def test_cut_part_makes_two_overlapping_parts():
     assert b.image_layer[:, :, 3].max() == 255
     # 重叠：两块宽度之和应大于原宽（因为出血重叠）
     assert (a.w + b.w) > part.w
+
+
+def test_build_part_mask_shape_and_values():
+    """part.mask 应与 image_layer 同尺寸，且取值仅为 0/255。"""
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    assert part.mask.shape == (part.h, part.w)
+    assert set(np.unique(part.mask)).issubset({0, 255})
+
+
+def test_cut_part_zero_length_line_no_cut():
+    """退化（零长）切割线：原样返回，不切出两份重叠整图。"""
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    midx = part.w // 2
+    a, b = pb.cut_part(part, (midx, 10), (midx, 10), bleed_mm=1.5)
+    assert a is part        # 原零件原样返回
+    assert b is None        # 没有第二块
