@@ -76,3 +76,11 @@ def test_build_part_has_vector_dieline():
     part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
     assert part.dieline_path                 # 非空
     assert "C" in part.dieline_path.upper()  # 平滑贝塞尔
+
+
+def test_cut_pieces_have_vector_dieline():
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    midx = part.w // 2
+    a, b = pb.cut_part(part, (midx, 0), (midx, part.h), bleed_mm=1.5)
+    assert a.dieline_path and b.dieline_path

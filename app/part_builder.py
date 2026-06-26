@@ -72,7 +72,9 @@ def _rebuild_from_die(layer_rgba, die_mask, part_id):
     if contours:
         biggest = max(contours, key=cv2.contourArea)
         contour = [(int(p[0][0]), int(p[0][1])) for p in biggest]
-    return Part(id=part_id, image_layer=crop_layer, mask=crop_die, contour=contour)
+    dieline_path = vz.trace_mask(crop_die)
+    return Part(id=part_id, image_layer=crop_layer, mask=crop_die,
+                contour=contour, dieline_path=dieline_path)
 
 
 def cut_part(part, p1, p2, bleed_mm=None):
