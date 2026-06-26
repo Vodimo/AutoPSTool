@@ -38,3 +38,16 @@ def test_build_part_contour_nonempty():
     img, mask = _single_subject()
     part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
     assert len(part.contour) >= 3
+
+
+def test_cut_part_makes_two_overlapping_parts():
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    # 竖直切一刀（从上到下）
+    midx = part.w // 2
+    a, b = pb.cut_part(part, (midx, 0), (midx, part.h), bleed_mm=1.5)
+    # 两块各自有内容
+    assert a.image_layer[:, :, 3].max() == 255
+    assert b.image_layer[:, :, 3].max() == 255
+    # 重叠：两块宽度之和应大于原宽（因为出血重叠）
+    assert (a.w + b.w) > part.w
