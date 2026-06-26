@@ -2,6 +2,7 @@
 from PIL import Image, ImageDraw
 
 from app import geometry as g
+from app import vectorize as vz
 
 
 def render_png(parts):
@@ -20,11 +21,18 @@ def render_png(parts):
             layer = layer.resize((new_w, new_h), Image.LANCZOS)
         canvas.alpha_composite(layer, (int(part.x), int(part.y)))
 
-        # 2) 描刀模轮廓（洋红，闭合）
-        pts = [(part.x + px * part.scale, part.y + py * part.scale)
-               for (px, py) in part.contour]
-        if len(pts) >= 2:
-            draw.line(pts + [pts[0]], fill=g.DIECUT_RGB + (255,), width=2)
+        # 2) 描刀模线：优先用矢量路径(平滑)，无则回退像素 contour
+        if part.dieline_path:
+            for poly in vz.path_to_polylines(part.dieline_path):
+                pts = [(part.x + px * part.scale, part.y + py * part.scale)
+                       for (px, py) in poly]
+                if len(pts) >= 2:
+                    draw.line(pts + [pts[0]], fill=g.DIECUT_RGB + (255,), width=2)
+        else:
+            pts = [(part.x + px * part.scale, part.y + py * part.scale)
+                   for (px, py) in part.contour]
+            if len(pts) >= 2:
+                draw.line(pts + [pts[0]], fill=g.DIECUT_RGB + (255,), width=2)
 
     return canvas
 
