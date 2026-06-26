@@ -13,6 +13,8 @@ COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
 
 def main(path):
     img = cv2.imread(path, cv2.IMREAD_COLOR)
+    if img is None:
+        sys.exit(f"无法读取图像: {path}")
     parts = seg.segment_subjects(img)
     overlay = img.copy()
     for i, p in enumerate(parts):

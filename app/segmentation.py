@@ -28,7 +28,7 @@ def get_alpha_mask(image_bgr: np.ndarray) -> np.ndarray:
     return mask
 
 
-def segment_subjects(image_bgr: np.ndarray, min_area: int = 800) -> list:
+def segment_subjects(image_bgr: np.ndarray, min_area: int = 800) -> list[dict]:
     """抠图 + 精修 + 多主体分离。返回 [{'mask','bbox'}, ...]。"""
     mask = get_alpha_mask(image_bgr)
     mask = ch.clean_edges(mask, ksize=3)             # 去毛刺
