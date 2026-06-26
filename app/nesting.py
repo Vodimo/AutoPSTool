@@ -4,18 +4,25 @@ import shapely.affinity
 
 from app import geometry as g
 
+SIMPLIFY_TOLERANCE_PX = 8  # 排版碰撞用多边形的简化容差(像素)，大幅减顶点提速
+
+
+def _scaled_polygon(part):
+    """零件轮廓按 scale 缩放并简化后的多边形（未平移）。简化大幅减少顶点，加速碰撞计算。"""
+    pts = [(px * part.scale, py * part.scale) for (px, py) in part.contour]
+    poly = shapely.geometry.Polygon(pts)
+    return poly.simplify(SIMPLIFY_TOLERANCE_PX, preserve_topology=True)
+
 
 def part_polygon(part):
     """零件轮廓 -> 板坐标多边形（含 scale 与 x/y 平移）。"""
-    pts = [(px * part.scale, py * part.scale) for (px, py) in part.contour]
-    poly = shapely.geometry.Polygon(pts)
+    poly = _scaled_polygon(part)
     return shapely.affinity.translate(poly, part.x, part.y)
 
 
 def _local_polygon(part):
     """零件在自身局部、已缩放、左上角对齐到 (0,0) 的多边形。"""
-    pts = [(px * part.scale, py * part.scale) for (px, py) in part.contour]
-    poly = shapely.geometry.Polygon(pts)
+    poly = _scaled_polygon(part)
     minx, miny, _, _ = poly.bounds
     return shapely.affinity.translate(poly, -minx, -miny)
 

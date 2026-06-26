@@ -28,3 +28,16 @@ def test_nest_no_overlap():
     pa = nesting.part_polygon(out[0])
     pb = nesting.part_polygon(out[1])
     assert not pa.intersects(pb)
+
+
+def test_nest_simplifies_high_vertex_contour():
+    import numpy as np
+    th = np.linspace(0, 2 * np.pi, 720, endpoint=False)
+    contour = [(int(300 + 250 * np.cos(t)), int(300 + 250 * np.sin(t))) for t in th]
+    layer = np.zeros((600, 600, 4), np.uint8); layer[:, :, 3] = 255
+    mask = np.full((600, 600), 255, np.uint8)
+    p = Part(id="c", image_layer=layer, mask=mask, contour=contour)
+    poly = nesting.part_polygon(p)
+    assert len(poly.exterior.coords) < 120   # 顶点大幅减少
+    out = nesting.nest([p])
+    assert out[0].x >= 0                      # 仍能放下

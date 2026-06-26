@@ -48,6 +48,7 @@ document.getElementById('file').onchange = async (e) => {
     } catch (err) { setStatus('抠图失败: ' + err.message); }
   };
   reader.readAsDataURL(f);
+  e.target.value = '';
 };
 
 // 切割模式
@@ -112,7 +113,7 @@ document.getElementById('btn-tidy').onclick = async () => {
 // 删除选中
 document.getElementById('btn-delete').onclick = () => {
   const t = canvas.getActiveObject();
-  if (t && t.partId) { objById.delete(t.partId); canvas.remove(t); }
+  if (t && t.partId) { objById.delete(t.partId); canvas.remove(t); canvas.discardActiveObject(); canvas.requestRenderAll(); }
 };
 
 // 导出 PNG -> /api/export
@@ -131,7 +132,7 @@ document.getElementById('btn-export').onclick = async () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = 'diecut_layout.png'; a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     setStatus('已导出');
   } catch (err) { setStatus('导出失败: ' + err.message); }
 };

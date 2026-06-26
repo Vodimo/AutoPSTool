@@ -113,7 +113,7 @@ def api_export():
 
 def main():
     threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
-    print("🚀 AutoPSTool 已启动: http://127.0.0.1:5000")
+    print("AutoPSTool 已启动: http://127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=False)
 
 
