@@ -15,6 +15,7 @@ __pycache__/
 # 运行产物
 output/
 *.pdf
+tests/debug/
 
 # rembg 模型缓存（如落到项目内）
 *.onnx
