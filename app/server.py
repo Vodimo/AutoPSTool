@@ -9,13 +9,14 @@ import cv2
 import numpy as np
 from flask import Flask, request, jsonify, send_file, send_from_directory, abort
 
-from app import segmentation, part_builder, nesting, exporter
+from app import segmentation, part_builder, nesting, exporter, geometry as g
 from app.models import Part
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
 app = Flask(__name__, static_folder=None)
 
 PARTS = {}  # id -> Part（单用户本地工具，内存会话足够）
+OFFSET_MM = g.OFFSET_MM  # 全局白边(会话级)，前端 /api/set_border 同步
 
 
 def _decode_image(b64: str):
@@ -41,17 +42,25 @@ def _require_json(*keys):
 
 
 def part_to_dict(part: Part) -> dict:
-    """零件图片层编码为 base64 PNG 给前端。"""
+    """零件序列化给前端：参数化零件下发主体图+轮廓；固定零件下发合成图+刀模。"""
+    if part.subject_outline:
+        ok, buf = cv2.imencode(".png", cv2.cvtColor(part.subject_image, cv2.COLOR_RGBA2BGRA))
+        if not ok:
+            raise RuntimeError("主体图 PNG 编码失败")
+        return {
+            "id": part.id, "kind": "parametric",
+            "subject_image": "data:image/png;base64," + base64.b64encode(buf).decode(),
+            "subject_outline": part.subject_outline,
+            "w": part.subject_image.shape[1], "h": part.subject_image.shape[0],
+        }
     rgba = part.image_layer
     ok, buf = cv2.imencode(".png", cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
     if not ok:
         raise RuntimeError("零件图片层 PNG 编码失败")
-    b64 = base64.b64encode(buf).decode()
     return {
-        "id": part.id,
-        "image_base64": "data:image/png;base64," + b64,
-        "w": part.w, "h": part.h,
-        "contour": part.contour,
+        "id": part.id, "kind": "fixed",
+        "image_base64": "data:image/png;base64," + base64.b64encode(buf).decode(),
+        "w": part.w, "h": part.h, "dieline_path": part.dieline_path,
     }
 
 
@@ -109,6 +118,14 @@ def api_nest():
     return jsonify({"positions": [{"id": p.id, "x": p.x, "y": p.y} for p in parts]})
 
 
+@app.route("/api/set_border", methods=["POST"])
+def api_set_border():
+    global OFFSET_MM
+    d = _require_json("offset_mm")
+    OFFSET_MM = float(d["offset_mm"])
+    return jsonify({"ok": True, "offset_mm": OFFSET_MM})
+
+
 @app.route("/api/export", methods=["POST"])
 def api_export():
     items = _require_json("items")["items"]
@@ -119,7 +136,7 @@ def api_export():
             continue
         p.x, p.y, p.scale = int(it["x"]), int(it["y"]), it.get("scale", 1.0)
         parts.append(p)
-    img = exporter.render_png(parts)
+    img = exporter.render_png(parts, offset_mm=OFFSET_MM)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)

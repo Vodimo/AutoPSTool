@@ -49,3 +49,26 @@ def test_export_returns_png():
     resp = client.post("/api/export", json={"items": [{"id": "a", "x": 50, "y": 50, "scale": 1.0}]})
     assert resp.status_code == 200
     assert resp.mimetype == "image/png"
+
+
+def test_set_border_updates_session():
+    client = server.app.test_client()
+    r = client.post("/api/set_border", json={"offset_mm": 5.5})
+    assert r.status_code == 200
+    assert r.get_json()["offset_mm"] == 5.5
+    assert server.OFFSET_MM == 5.5
+
+
+def test_segment_returns_subject_fields():
+    import numpy as np, cv2, base64
+    img = np.full((300, 300, 3), 255, np.uint8)
+    cv2.circle(img, (150, 150), 80, (0, 140, 200), -1)
+    ok, buf = cv2.imencode(".png", img)
+    b64 = "data:image/png;base64," + base64.b64encode(buf).decode()
+    server.PARTS.clear()
+    client = server.app.test_client()
+    r = client.post("/api/segment", json={"image_base64": b64})
+    assert r.status_code == 200
+    parts = r.get_json()["parts"]
+    assert parts and parts[0]["kind"] == "parametric"
+    assert parts[0]["subject_outline"] and parts[0]["subject_image"].startswith("data:image/png")
