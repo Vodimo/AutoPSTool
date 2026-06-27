@@ -53,8 +53,23 @@ def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None) -> Part:
         contour = [(int(p[0][0]), int(p[0][1])) for p in biggest]
 
     dieline_path = vz.trace_mask(crop_die)
+
+    # 额外产出"纯主体图(透明底)"与"主体轮廓"，供前端参数化白边
+    sx, sy, sw, sh = cv2.boundingRect(msk)
+    subj_mask_crop = msk[sy:sy + sh, sx:sx + sw]
+    subj_img_bgr = img[sy:sy + sh, sx:sx + sw]
+    subject_image = np.zeros((sh, sw, 4), np.uint8)
+    sb, sg, sr = cv2.split(subj_img_bgr)
+    sm = subj_mask_crop > 0
+    subject_image[sm, 0] = sr[sm]
+    subject_image[sm, 1] = sg[sm]
+    subject_image[sm, 2] = sb[sm]
+    subject_image[sm, 3] = 255
+    subject_outline = vz.trace_mask(subj_mask_crop)
+
     return Part(id=part_id, image_layer=layer, mask=crop_die,
-                contour=contour, dieline_path=dieline_path)
+                contour=contour, dieline_path=dieline_path,
+                subject_image=subject_image, subject_outline=subject_outline)
 
 
 def _rebuild_from_die(layer_rgba, die_mask, part_id):

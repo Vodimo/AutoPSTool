@@ -10,6 +10,8 @@ class Part:
     mask: np.ndarray                     # HxW 0/255：膨胀后的刀模掩膜（局部坐标）
     contour: list[tuple[int, int]]       # [(x,y), ...] 刀模轮廓（局部坐标）
     dieline_path: str = ""               # potrace 矢量刀模路径(局部坐标 SVG d)
+    subject_image: "np.ndarray | None" = None   # 纯主体 RGBA(透明底,不含白边)
+    subject_outline: str = ""                    # 主体掩膜矢量轮廓(主体 bbox 局部坐标)
     x: int = 0
     y: int = 0
     scale: float = 1.0

@@ -84,3 +84,15 @@ def test_cut_pieces_have_vector_dieline():
     midx = part.w // 2
     a, b = pb.cut_part(part, (midx, 0), (midx, part.h), bleed_mm=1.5)
     assert a.dieline_path and b.dieline_path
+
+
+def test_build_part_has_subject_image_and_outline():
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    # 主体图：透明底、RGBA、裁到主体(不含白边，应比含白边的 image_layer 小)
+    assert part.subject_image is not None
+    assert part.subject_image.shape[2] == 4
+    assert part.subject_image.shape[0] <= part.image_layer.shape[0]
+    assert part.subject_image[0, 0, 3] == 0          # 角落透明
+    # 主体轮廓：非空且含曲线
+    assert part.subject_outline and "C" in part.subject_outline.upper()
