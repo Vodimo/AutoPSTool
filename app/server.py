@@ -116,7 +116,7 @@ def api_nest():
             continue
         p.scale = it.get("scale", 1.0)
         parts.append(p)
-    nesting.nest(parts)
+    nesting.nest(parts, offset_mm=OFFSET_MM)
     return jsonify({"positions": [{"id": p.id, "x": p.x, "y": p.y} for p in parts]})
 
 

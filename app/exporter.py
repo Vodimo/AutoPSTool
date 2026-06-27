@@ -43,7 +43,7 @@ def render_png(parts, offset_mm=None):
                                     max(1, int(subj.height * s))), Image.LANCZOS)
             sxoff = part.x + (0 - minx) * s
             syoff = part.y + (0 - miny) * s
-            canvas.alpha_composite(subj, (int(sxoff), int(syoff)))
+            canvas.alpha_composite(subj, (round(sxoff), round(syoff)))
             _draw_polyline(draw, white_pts, g.DIECUT_RGB + (255,))
         else:
             # —— 固定零件(切割碎块/旧)：沿用 image_layer + dieline_path ——
