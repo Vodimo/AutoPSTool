@@ -13,3 +13,5 @@ button.active { background: #ec4899; color: #fff; border-color: #ec4899; }
    fabric 会叠两层 canvas(下层绘图 + 上层交互)，若给 canvas 本身设白底，
    上层交互画布会变成不透明白幕，遮住下层绘制的零件。 */
 .canvas-container { box-shadow: 0 1px 4px rgba(0,0,0,.15); background: #fff; }
+#progress { width: 100%; }
+#border-range { accent-color: #ec4899; }

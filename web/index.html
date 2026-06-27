@@ -6,18 +6,27 @@
   <title>AutoPSTool 刀模排版</title>
   <link rel="stylesheet" href="/style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+  <script src="/lib/clipper.js"></script>
 </head>
 <body>
   <header>
     <h1>AutoPSTool</h1>
     <input type="file" id="file" accept="image/png,image/jpeg" style="display:none">
     <button id="btn-import">导入图片</button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px">白边
+      <input type="range" id="border-range" min="0" max="100" step="1" value="20">
+      <input type="number" id="border-num" min="0" step="0.1" value="2" style="width:56px">
+      <select id="border-unit"><option value="mm">mm</option><option value="px">px</option></select>
+    </label>
     <button id="btn-cut">切割模式</button>
     <button id="btn-tidy">整理排版</button>
     <button id="btn-delete">删除选中</button>
     <button id="btn-export">导出 PNG</button>
     <span id="status">就绪</span>
   </header>
+  <div id="progress" style="display:none;height:3px;background:#e2e8f0">
+    <div id="progress-bar" style="height:100%;width:30%;background:#ec4899;transition:width .2s"></div>
+  </div>
   <div id="wrap">
     <canvas id="c" width="630" height="891"></canvas>
   </div>
