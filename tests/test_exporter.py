@@ -45,3 +45,27 @@ def test_render_uses_vector_dieline_smooth():
     # 矢量刀模应是非空闭合曲线，洋红像素分布在一圈而非聚成一团
     ys, xs = np.where(magenta)
     assert (xs.max() - xs.min()) > 150 and (ys.max() - ys.min()) > 150
+
+
+def _para_part(x=100, y=100):
+    img = np.full((300, 300, 3), 255, np.uint8)
+    cv2.circle(img, (150, 150), 90, (0, 140, 200), -1)
+    mask = np.zeros((300, 300), np.uint8)
+    cv2.circle(mask, (150, 150), 90, 255, -1)
+    p = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    p.x, p.y = x, y
+    return p
+
+
+def test_render_offset_grows_white_and_magenta_extent():
+    p = _para_part()
+    a = np.array(exporter.render_png([p], offset_mm=2.0).convert("RGB"))
+    b = np.array(exporter.render_png([p], offset_mm=6.0).convert("RGB"))
+
+    def magenta_extent(arr):
+        m = (arr[:, :, 0] > 200) & (arr[:, :, 1] < 60) & (arr[:, :, 2] > 200)
+        ys, xs = np.where(m)
+        return (xs.max() - xs.min()) if len(xs) else 0
+
+    ea, eb = magenta_extent(a), magenta_extent(b)
+    assert ea > 0 and eb > ea          # 白边越大，刀模外延越大
