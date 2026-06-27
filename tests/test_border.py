@@ -35,3 +35,24 @@ def test_dieline_path_at_is_closed_d():
 def test_empty_outline_returns_empty():
     assert border.dieline_polygon("", 10.0).is_empty
     assert border.dieline_path_at("", 10.0) == ""
+
+
+def test_outer_polyline_ignores_hole_single_smooth_ring():
+    # 带洞主体：外圈 r=90 + 内洞 r=30。potrace 出 2 条子路径(外+洞)。
+    m = np.zeros((300, 300), np.uint8)
+    cv2.circle(m, (150, 150), 90, 255, -1)
+    cv2.circle(m, (150, 150), 30, 0, -1)
+    d = vz.trace_mask(m)
+    ring = border.outer_polyline(d)
+    # 平滑(远多于端点法的寥寥几点)但已简化(不至于上百冗余点)
+    assert 12 <= len(ring) < 200
+    xs = [p[0] for p in ring]
+    ys = [p[1] for p in ring]
+    # 取的是外环(直径~180)，不是洞(直径~60)
+    assert (max(xs) - min(xs)) > 150 and (max(ys) - min(ys)) > 150
+    # 元素是 [x, y] 数值对
+    assert len(ring[0]) == 2
+
+
+def test_outer_polyline_empty_outline():
+    assert border.outer_polyline("") == []

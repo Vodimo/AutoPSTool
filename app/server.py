@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from flask import Flask, request, jsonify, send_file, send_from_directory, abort
 
-from app import segmentation, part_builder, nesting, exporter, geometry as g
+from app import segmentation, part_builder, nesting, exporter, border, geometry as g
 from app.models import Part
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
@@ -51,6 +51,8 @@ def part_to_dict(part: Part) -> dict:
             "id": part.id, "kind": "parametric",
             "subject_image": "data:image/png;base64," + base64.b64encode(buf).decode(),
             "subject_outline": part.subject_outline,
+            # 细采样的最外环点集：前端 clipper 直接缓冲它(无端点法粗棱角、无洞连线斜杠)
+            "subject_poly": border.outer_polyline(part.subject_outline),
             "w": part.subject_image.shape[1], "h": part.subject_image.shape[0],
         }
     rgba = part.image_layer

@@ -47,7 +47,8 @@ function parseDToPolyline(d) {
 function bufferOutline(polyline, offsetPx) {
   const SCALE = 100;
   const path = polyline.map(([x, y]) => ({ X: Math.round(x * SCALE), Y: Math.round(y * SCALE) }));
-  const co = new ClipperLib.ClipperOffset(2, 0.25);
+  // arcTolerance 单位是缩放后坐标：取 0.25px * SCALE，圆角足够平滑又不会生成上千冗余点(否则画布卡顿)
+  const co = new ClipperLib.ClipperOffset(2, 0.25 * SCALE);
   co.AddPath(path, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
   const solution = new ClipperLib.Paths();
   co.Execute(solution, offsetPx * SCALE);
@@ -64,7 +65,9 @@ function buildGroupSync(p) {
   const el = imgElById.get(p.id);
   if (!el) return null;
   if (p.kind === 'parametric') {
-    const outline = parseDToPolyline(p.subject_outline);
+    // 直接用后端下发的"细采样最外环"(subject_poly)：无端点法粗棱角、无洞连线斜杠
+    const outline = p.subject_poly && p.subject_poly.length >= 3
+      ? p.subject_poly : parseDToPolyline(p.subject_outline);
     const die = bufferOutline(outline, borderPx);   // 物理像素
     if (die.length < 3) return null;
     const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
