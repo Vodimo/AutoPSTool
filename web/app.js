@@ -93,18 +93,12 @@ function fitView() {
   let minX = 0, minY = 0, maxX = pageWpx, maxY = pageHpx;
   canvas.getObjects().forEach(obj => {
     if (obj === pageRect) return;
-    const br = obj.getBoundingRect(true, true);   // useCache=true, absolute=true
-    // getBoundingRect 返回的是画布视口坐标，需转换到物理坐标
-    const vpt = canvas.viewportTransform;
-    const zoom = canvas.getZoom();
-    const ox = (br.left - vpt[4]) / zoom;
-    const oy = (br.top  - vpt[5]) / zoom;
-    const ow = br.width  / zoom;
-    const oh = br.height / zoom;
-    minX = Math.min(minX, ox);
-    minY = Math.min(minY, oy);
-    maxX = Math.max(maxX, ox + ow);
-    maxY = Math.max(maxY, oy + oh);
+    // absolute=true 返回不含 viewport 的物理坐标包围盒，直接用即可
+    const br = obj.getBoundingRect(true);
+    minX = Math.min(minX, br.left);
+    minY = Math.min(minY, br.top);
+    maxX = Math.max(maxX, br.left + br.width);
+    maxY = Math.max(maxY, br.top + br.height);
   });
 
   const bboxW = maxX - minX;
@@ -319,11 +313,11 @@ document.getElementById('file').onchange = async (e) => {
       showProgress(0.7);
       let i = 0;
       for (const p of parts) {
-        // 新零件散落在纸框右侧：x = pageWpx + 100 + 列偏移，y = 行偏移
+        // 新零件初始散落在纸框内/附近(物理坐标)，便于直接落在可印刷区；之后可「整理排版」
         const col = (importCounter + i) % 5;
         const row = Math.floor((importCounter + i) / 5);
-        const x = pageWpx + 100 + col * 300;
-        const y = 20 + row * 300;
+        const x = 20 + col * 320;
+        const y = 20 + row * 320;
         await addPart(p, x, y);
         i++;
       }
