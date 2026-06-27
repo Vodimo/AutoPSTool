@@ -9,6 +9,7 @@ let cutMode = false;
 let borderPx = 20;                       // 当前白边(px，物理像素)，默认 2mm
 const objById = new Map();
 const partData = new Map();              // id -> 后端返回的零件数据(含 subject_outline 等)
+const imgElById = new Map();             // id -> 已加载的 HTMLImageElement(只加载一次)
 
 // —— 进度 ——
 const prog = document.getElementById('progress');
@@ -57,56 +58,61 @@ function bufferOutline(polyline, offsetPx) {
   return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
 }
 
-// —— 由零件数据 + 当前 borderPx 构建一个 fabric.Group（画布像素，未定位）——
-function buildGroup(p) {
+// —— 同步由「已缓存图片元素 + 当前 borderPx」构建一个 fabric.Group（无异步、无泄漏）——
+// 关键：主体图只加载一次（loadPartImage），改白边只同步重算多边形，避免并发重建堆积。
+function buildGroupSync(p) {
+  const el = imgElById.get(p.id);
+  if (!el) return null;
+  if (p.kind === 'parametric') {
+    const outline = parseDToPolyline(p.subject_outline);
+    const die = bufferOutline(outline, borderPx);   // 物理像素
+    if (die.length < 3) return null;
+    const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
+    const miny = die.reduce((a, q) => Math.min(a, q[1]), Infinity);
+    const ringView = die.map(([x, y]) => ({ x: (x - minx) * VIEW_SCALE, y: (y - miny) * VIEW_SCALE }));
+    const white = new fabric.Polygon(ringView, { fill: '#fff', stroke: '', selectable: false, evented: false, objectCaching: false });
+    const dieLine = new fabric.Polygon(ringView, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false });
+    const img = new fabric.Image(el, { left: (0 - minx) * VIEW_SCALE, top: (0 - miny) * VIEW_SCALE, scaleX: VIEW_SCALE, scaleY: VIEW_SCALE, selectable: false, evented: false });
+    return new fabric.Group([white, img, dieLine], { partId: p.id, cornerSize: 8, transparentCorners: false });
+  }
+  const img = new fabric.Image(el, { scaleX: VIEW_SCALE, scaleY: VIEW_SCALE, selectable: false, evented: false });
+  const children = [img];
+  if (p.dieline_path) {
+    const ring = parseDToPolyline(p.dieline_path).map(([x, y]) => ({ x: x * VIEW_SCALE, y: y * VIEW_SCALE }));
+    if (ring.length >= 2) children.push(new fabric.Polygon(ring, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false }));
+  }
+  return new fabric.Group(children, { partId: p.id, cornerSize: 8, transparentCorners: false });
+}
+
+// 加载零件图片元素（每个零件只一次），存入 imgElById
+function loadPartImage(p) {
   return new Promise((resolve) => {
-    if (p.kind === 'parametric') {
-      const outline = parseDToPolyline(p.subject_outline);
-      const die = bufferOutline(outline, borderPx);   // 物理像素
-      const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
-      const miny = die.reduce((a, q) => Math.min(a, q[1]), Infinity);
-      const ringView = die.map(([x, y]) => ({ x: (x - minx) * VIEW_SCALE, y: (y - miny) * VIEW_SCALE }));
-      const white = new fabric.Polygon(ringView, { fill: '#fff', stroke: '', selectable: false, evented: false, objectCaching: false });
-      const dieLine = new fabric.Polygon(ringView, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false });
-      fabric.Image.fromURL(p.subject_image, (img) => {
-        img.set({ left: (0 - minx) * VIEW_SCALE, top: (0 - miny) * VIEW_SCALE, scaleX: VIEW_SCALE, scaleY: VIEW_SCALE, selectable: false, evented: false });
-        const grp = new fabric.Group([white, img, dieLine], { partId: p.id, cornerSize: 8, transparentCorners: false });
-        resolve(grp);
-      }, { crossOrigin: null });
-    } else {
-      fabric.Image.fromURL(p.image_base64, (img) => {
-        img.set({ scaleX: VIEW_SCALE, scaleY: VIEW_SCALE, selectable: false, evented: false });
-        const children = [img];
-        if (p.dieline_path) {
-          const ring = parseDToPolyline(p.dieline_path).map(([x, y]) => ({ x: x * VIEW_SCALE, y: y * VIEW_SCALE }));
-          if (ring.length >= 2) children.push(new fabric.Polygon(ring, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false }));
-        }
-        resolve(new fabric.Group(children, { partId: p.id, cornerSize: 8, transparentCorners: false }));
-      }, { crossOrigin: null });
-    }
+    const url = p.kind === 'parametric' ? p.subject_image : p.image_base64;
+    fabric.Image.fromURL(url, (img) => { imgElById.set(p.id, img.getElement()); resolve(); }, { crossOrigin: null });
   });
 }
 
 async function addPart(p, x, y) {
   partData.set(p.id, p);
-  const grp = await buildGroup(p);
+  await loadPartImage(p);
+  const grp = buildGroupSync(p);
+  if (!grp) return;
   grp.set({ left: x, top: y });
   objById.set(p.id, grp);
   canvas.add(grp);
   canvas.requestRenderAll();
 }
 
-// —— 重建某零件 Group（白边变化时，保留位置/缩放）——
-async function rebuildPart(id) {
+// —— 重建某零件 Group（同步：白边变化时重算多边形，保留位置/缩放/角度；无异步无泄漏）——
+function rebuildPart(id) {
   const old = objById.get(id);
   if (!old) return;
-  const { left, top, scaleX, scaleY, angle } = old;
-  const grp = await buildGroup(partData.get(id));
-  grp.set({ left, top, scaleX, scaleY, angle });
+  const grp = buildGroupSync(partData.get(id));
+  if (!grp) return;
+  grp.set({ left: old.left, top: old.top, scaleX: old.scaleX, scaleY: old.scaleY, angle: old.angle });
   canvas.remove(old);
   objById.set(id, grp);
   canvas.add(grp);
-  canvas.requestRenderAll();
 }
 
 // 导入图片 -> /api/segment
@@ -182,7 +188,7 @@ document.getElementById('btn-export').onclick = async () => {
 // 删除选中
 document.getElementById('btn-delete').onclick = () => {
   const t = canvas.getActiveObject();
-  if (t && t.partId) { objById.delete(t.partId); partData.delete(t.partId); canvas.remove(t); canvas.discardActiveObject(); canvas.requestRenderAll(); }
+  if (t && t.partId) { objById.delete(t.partId); partData.delete(t.partId); imgElById.delete(t.partId); canvas.remove(t); canvas.discardActiveObject(); canvas.requestRenderAll(); }
 };
 
 // 整理排版 -> /api/nest（沿用：位置回填）
