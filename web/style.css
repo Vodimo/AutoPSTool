@@ -1,17 +1,20 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, sans-serif; background: #f1f5f9; color: #1e293b; }
+body { font-family: system-ui, sans-serif; background: #f1f5f9; color: #1e293b; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 header { display: flex; gap: 12px; align-items: center; padding: 10px 16px;
-         background: #fff; border-bottom: 1px solid #e2e8f0; }
+         background: #fff; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; flex-wrap: wrap; }
 header h1 { font-size: 16px; }
 button { padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px;
          background: #fff; cursor: pointer; font-size: 13px; }
 button:hover { background: #f8fafc; }
 button.active { background: #ec4899; color: #fff; border-color: #ec4899; }
-#wrap { display: flex; justify-content: center; padding: 16px; }
+/* #wrap 填充剩余空间，canvas 完全填充 wrap */
+#wrap { flex: 1; overflow: hidden; position: relative; }
+#wrap canvas { display: block; }
 #status { margin-left: auto; font-size: 12px; color: #64748b; }
-/* 白底与阴影放在 fabric 生成的外层容器上：
-   fabric 会叠两层 canvas(下层绘图 + 上层交互)，若给 canvas 本身设白底，
-   上层交互画布会变成不透明白幕，遮住下层绘制的零件。 */
-.canvas-container { box-shadow: 0 1px 4px rgba(0,0,0,.15); background: #fff; }
-#progress { width: 100%; }
+/* fabric 生成的外层容器：不设白底（画布背景色由 JS 设置为灰色） */
+.canvas-container { width: 100% !important; height: 100% !important; }
+#progress { width: 100%; flex-shrink: 0; }
 #border-range { accent-color: #ec4899; }
+/* 纸张尺寸控件中的数字输入框 */
+#page-w, #page-h { width: 52px; }
+input[type=number]:disabled { background: #f1f5f9; color: #94a3b8; }

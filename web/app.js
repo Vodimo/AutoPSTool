@@ -1,15 +1,36 @@
-// 视图缩放：画布显示 630x891，对应物理 2100x2970 px
-const VIEW_SCALE = 0.3;
-const PIXEL_RATIO = 10;                 // 1mm=10px（与后端 geometry 一致）
-const canvas = new fabric.Canvas('c', { selection: true, backgroundColor: '#fff' });
+// 物理像素坐标模型：1mm=10px（与后端 geometry 一致）
+// 不再使用 VIEW_SCALE；零件 group.left/top 均为物理像素；
+// 显示通过 fabric viewport zoom/pan 控制缩放。
+const PIXEL_RATIO = 10;                 // 1mm=10px
+
+// 纸张预设（mm）
+const PAGE_PRESETS = {
+  A4:     { w: 210, h: 297 },
+  A3:     { w: 297, h: 420 },
+  A5:     { w: 148, h: 210 },
+  Letter: { w: 216, h: 279 },
+};
+
+// 当前纸张物理尺寸（px）
+let pageWpx = 210 * PIXEL_RATIO;   // 2100
+let pageHpx = 297 * PIXEL_RATIO;   // 2970
+
+const canvas = new fabric.Canvas('c', {
+  selection: true,
+  backgroundColor: '#e2e8f0',   // 中性灰背景，白色纸框更突出
+});
+
 const statusEl = document.getElementById('status');
 const setStatus = (t) => statusEl.textContent = t;
 
 let cutMode = false;
 let borderPx = 20;                       // 当前白边(px，物理像素)，默认 2mm
 const objById = new Map();
-const partData = new Map();              // id -> 后端返回的零件数据(含 subject_outline 等)
-const imgElById = new Map();             // id -> 已加载的 HTMLImageElement(只加载一次)
+const partData = new Map();              // id -> 后端返回的零件数据
+const imgElById = new Map();             // id -> 已加载的 HTMLImageElement（只加载一次）
+
+// 纸框 Rect（始终置于最底层）
+let pageRect = null;
 
 // —— 进度 ——
 const prog = document.getElementById('progress');
@@ -26,7 +47,163 @@ async function api(path, body) {
   return r;
 }
 
-// —— SVG path d → 点集（简单解析 M/L/C，C 取端点折线，够碰撞/显示用）——
+// —— 画布尺寸跟随 #wrap 容器 ——
+function resizeCanvas() {
+  const wrap = document.getElementById('wrap');
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  canvas.setWidth(w);
+  canvas.setHeight(h);
+  canvas.requestRenderAll();
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();   // 初始化
+
+// —— 纸框：创建/更新 ——
+function createPageRect() {
+  if (pageRect) {
+    canvas.remove(pageRect);
+    pageRect = null;
+  }
+  pageRect = new fabric.Rect({
+    left: 0,
+    top: 0,
+    width: pageWpx,
+    height: pageHpx,
+    fill: '#ffffff',
+    stroke: '#cbd5e1',
+    strokeWidth: 1,
+    selectable: false,
+    evented: false,
+    hasControls: false,
+    hasBorders: false,
+  });
+  canvas.add(pageRect);
+  canvas.sendToBack(pageRect);
+  canvas.requestRenderAll();
+}
+createPageRect();
+
+// —— fit-view：使纸框+所有零件居中可见（留 5% 边距）——
+function fitView() {
+  const cw = canvas.getWidth();
+  const ch = canvas.getHeight();
+
+  // 计算所有对象在物理坐标下的总包围盒
+  let minX = 0, minY = 0, maxX = pageWpx, maxY = pageHpx;
+  canvas.getObjects().forEach(obj => {
+    if (obj === pageRect) return;
+    const br = obj.getBoundingRect(true, true);   // useCache=true, absolute=true
+    // getBoundingRect 返回的是画布视口坐标，需转换到物理坐标
+    const vpt = canvas.viewportTransform;
+    const zoom = canvas.getZoom();
+    const ox = (br.left - vpt[4]) / zoom;
+    const oy = (br.top  - vpt[5]) / zoom;
+    const ow = br.width  / zoom;
+    const oh = br.height / zoom;
+    minX = Math.min(minX, ox);
+    minY = Math.min(minY, oy);
+    maxX = Math.max(maxX, ox + ow);
+    maxY = Math.max(maxY, oy + oh);
+  });
+
+  const bboxW = maxX - minX;
+  const bboxH = maxY - minY;
+  if (bboxW <= 0 || bboxH <= 0) return;
+
+  const margin = 0.05;   // 5% 边距
+  const scaleX = (cw * (1 - 2 * margin)) / bboxW;
+  const scaleY = (ch * (1 - 2 * margin)) / bboxH;
+  const zoom = Math.max(0.1, Math.min(8, Math.min(scaleX, scaleY)));
+
+  // 使 bbox 中心对准画布中心
+  const bboxCx = (minX + maxX) / 2 * zoom;
+  const bboxCy = (minY + maxY) / 2 * zoom;
+  const panX = cw / 2 - bboxCx;
+  const panY = ch / 2 - bboxCy;
+
+  canvas.setZoom(zoom);
+  canvas.viewportTransform[4] = panX;
+  canvas.viewportTransform[5] = panY;
+  canvas.requestRenderAll();
+}
+
+// —— 缩放：鼠标滚轮以光标为锚点 ——
+canvas.on('mouse:wheel', function (opt) {
+  const e = opt.e;
+  const delta = e.deltaY;
+  let zoom = canvas.getZoom();
+  zoom *= Math.pow(0.999, delta);
+  zoom = Math.max(0.1, Math.min(8, zoom));
+  canvas.zoomToPoint({ x: e.offsetX, y: e.offsetY }, zoom);
+  e.preventDefault();
+  e.stopPropagation();
+});
+
+// —— 平移：空格键 或 中键拖拽 ——
+let isPanning = false;
+let spaceDown = false;
+let panStart = null;
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && !e.repeat) {
+    spaceDown = true;
+    // 阻止空格导致页面滚动
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space') {
+    spaceDown = false;
+    if (isPanning) {
+      isPanning = false;
+      canvas.selection = true;
+    }
+  }
+});
+
+canvas.on('mouse:down', function (opt) {
+  const e = opt.e;
+  // 空格按住 或 中键
+  if (spaceDown || e.button === 1) {
+    isPanning = true;
+    panStart = { x: e.clientX, y: e.clientY };
+    canvas.selection = false;
+    // 禁止对象被拖拽
+    canvas.getObjects().forEach(o => { o.__prevSelectable = o.selectable; o.selectable = false; });
+    e.preventDefault();
+  }
+});
+
+canvas.on('mouse:move', function (opt) {
+  if (!isPanning || !panStart) return;
+  const e = opt.e;
+  const dx = e.clientX - panStart.x;
+  const dy = e.clientY - panStart.y;
+  panStart = { x: e.clientX, y: e.clientY };
+  const vpt = canvas.viewportTransform;
+  vpt[4] += dx;
+  vpt[5] += dy;
+  canvas.requestRenderAll();
+  opt.e.preventDefault();
+});
+
+canvas.on('mouse:up', function (opt) {
+  if (isPanning) {
+    isPanning = false;
+    if (!spaceDown) canvas.selection = true;
+    // 恢复对象可选状态
+    canvas.getObjects().forEach(o => {
+      if (typeof o.__prevSelectable !== 'undefined') {
+        o.selectable = o.__prevSelectable;
+        delete o.__prevSelectable;
+      }
+    });
+  }
+  panStart = null;
+});
+
+// —— SVG path d → 点集（解析 M/L/C，C 取端点折线）——
 function parseDToPolyline(d) {
   const pts = [];
   const re = /([MLC])([^MLCZ]*)/gi;
@@ -43,11 +220,10 @@ function parseDToPolyline(d) {
   return pts;
 }
 
-// —— clipper 缓冲：主体轮廓点集 → 向外 offset 的白边/刀模多边形点集 ——
+// —— clipper 缓冲：主体轮廓点集 → 向外 offset 的白边/刀模多边形点集（物理 px）——
 function bufferOutline(polyline, offsetPx) {
   const SCALE = 100;
   const path = polyline.map(([x, y]) => ({ X: Math.round(x * SCALE), Y: Math.round(y * SCALE) }));
-  // arcTolerance 单位是缩放后坐标：取 0.25px * SCALE，圆角足够平滑又不会生成上千冗余点(否则画布卡顿)
   const co = new ClipperLib.ClipperOffset(2, 0.25 * SCALE);
   co.AddPath(path, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
   const solution = new ClipperLib.Paths();
@@ -59,29 +235,36 @@ function bufferOutline(polyline, offsetPx) {
   return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
 }
 
-// —— 同步由「已缓存图片元素 + 当前 borderPx」构建一个 fabric.Group（无异步、无泄漏）——
-// 关键：主体图只加载一次（loadPartImage），改白边只同步重算多边形，避免并发重建堆积。
+// —— 同步由「已缓存图片元素 + 当前 borderPx」构建一个 fabric.Group（物理坐标）——
+// 主体图 scaleX/scaleY=1（物理），多边形点用物理 px
 function buildGroupSync(p) {
   const el = imgElById.get(p.id);
   if (!el) return null;
   if (p.kind === 'parametric') {
-    // 直接用后端下发的"细采样最外环"(subject_poly)：无端点法粗棱角、无洞连线斜杠
+    // 使用后端下发的细采样最外环(subject_poly)
     const outline = p.subject_poly && p.subject_poly.length >= 3
       ? p.subject_poly : parseDToPolyline(p.subject_outline);
     const die = bufferOutline(outline, borderPx);   // 物理像素
     if (die.length < 3) return null;
     const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
     const miny = die.reduce((a, q) => Math.min(a, q[1]), Infinity);
-    const ringView = die.map(([x, y]) => ({ x: (x - minx) * VIEW_SCALE, y: (y - miny) * VIEW_SCALE }));
-    const white = new fabric.Polygon(ringView, { fill: '#fff', stroke: '', selectable: false, evented: false, objectCaching: false });
-    const dieLine = new fabric.Polygon(ringView, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false });
-    const img = new fabric.Image(el, { left: (0 - minx) * VIEW_SCALE, top: (0 - miny) * VIEW_SCALE, scaleX: VIEW_SCALE, scaleY: VIEW_SCALE, selectable: false, evented: false });
+    // 多边形点相对于 group 原点（物理坐标，scaleX/Y=1）
+    const ringPts = die.map(([x, y]) => ({ x: x - minx, y: y - miny }));
+    const white   = new fabric.Polygon(ringPts, { fill: '#fff', stroke: '', selectable: false, evented: false, objectCaching: false });
+    const dieLine = new fabric.Polygon(ringPts, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false });
+    // 主体图 scaleX/Y=1，left/top 相对 group 原点（物理像素）
+    const img = new fabric.Image(el, {
+      left: -minx, top: -miny,
+      scaleX: 1, scaleY: 1,
+      selectable: false, evented: false,
+    });
     return new fabric.Group([white, img, dieLine], { partId: p.id, cornerSize: 8, transparentCorners: false });
   }
-  const img = new fabric.Image(el, { scaleX: VIEW_SCALE, scaleY: VIEW_SCALE, selectable: false, evented: false });
+  // 固定白边模式：image_base64 + dieline_path
+  const img = new fabric.Image(el, { scaleX: 1, scaleY: 1, selectable: false, evented: false });
   const children = [img];
   if (p.dieline_path) {
-    const ring = parseDToPolyline(p.dieline_path).map(([x, y]) => ({ x: x * VIEW_SCALE, y: y * VIEW_SCALE }));
+    const ring = parseDToPolyline(p.dieline_path).map(([x, y]) => ({ x, y }));
     if (ring.length >= 2) children.push(new fabric.Polygon(ring, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false }));
   }
   return new fabric.Group(children, { partId: p.id, cornerSize: 8, transparentCorners: false });
@@ -95,6 +278,9 @@ function loadPartImage(p) {
   });
 }
 
+// 导入计数器（控制初始散落位置，放在纸框右侧）
+let importCounter = 0;
+
 async function addPart(p, x, y) {
   partData.set(p.id, p);
   await loadPartImage(p);
@@ -106,7 +292,7 @@ async function addPart(p, x, y) {
   canvas.requestRenderAll();
 }
 
-// —— 重建某零件 Group（同步：白边变化时重算多边形，保留位置/缩放/角度；无异步无泄漏）——
+// —— 重建某零件 Group（同步：白边变化时重算多边形，保留位置/缩放/角度）——
 function rebuildPart(id) {
   const old = objById.get(id);
   if (!old) return;
@@ -116,6 +302,8 @@ function rebuildPart(id) {
   canvas.remove(old);
   objById.set(id, grp);
   canvas.add(grp);
+  // 确保纸框仍在最底层
+  if (pageRect) canvas.sendToBack(pageRect);
 }
 
 // 导入图片 -> /api/segment
@@ -130,8 +318,19 @@ document.getElementById('file').onchange = async (e) => {
       const { parts } = await r.json();
       showProgress(0.7);
       let i = 0;
-      for (const p of parts) { await addPart(p, 20 + (i % 5) * 110, 20 + Math.floor(i / 5) * 110); i++; }
+      for (const p of parts) {
+        // 新零件散落在纸框右侧：x = pageWpx + 100 + 列偏移，y = 行偏移
+        const col = (importCounter + i) % 5;
+        const row = Math.floor((importCounter + i) / 5);
+        const x = pageWpx + 100 + col * 300;
+        const y = 20 + row * 300;
+        await addPart(p, x, y);
+        i++;
+      }
+      importCounter += parts.length;
       setStatus(`分离出 ${parts.length} 个零件`);
+      // 导入后适应视图使新零件可见
+      fitView();
     } catch (err) { setStatus('抠图失败: ' + err.message); }
     finally { hideProgress(); }
   };
@@ -140,8 +339,8 @@ document.getElementById('file').onchange = async (e) => {
 };
 
 // —— 白边滑块（mm/px，全局，实时）——
-const rng = document.getElementById('border-range');
-const num = document.getElementById('border-num');
+const rng  = document.getElementById('border-range');
+const num  = document.getElementById('border-num');
 const unit = document.getElementById('border-unit');
 function setBorderFromMm(mm) {
   borderPx = mm * PIXEL_RATIO;
@@ -159,23 +358,135 @@ rng.oninput = () => {
   num.value = (unit.value === 'px') ? (mm * PIXEL_RATIO).toFixed(0) : mm.toFixed(1);
   setBorderFromMm(mm);
 };
-num.oninput = syncFromControls;
+num.oninput  = syncFromControls;
 unit.onchange = syncFromControls;
 // 松手把最终值同步给后端（导出用）
 function commitBorder() {
   const mm = parseFloat(rng.value) / PIXEL_RATIO;
   api('/api/set_border', { offset_mm: mm }).catch(() => {});
 }
-rng.onchange = commitBorder;
-num.onchange = commitBorder;
+rng.onchange  = commitBorder;
+num.onchange  = commitBorder;
 
-// 导出 PNG -> /api/export
+// —— 纸张尺寸控件 ——
+const pagePreset = document.getElementById('page-preset');
+const pageWInput = document.getElementById('page-w');
+const pageHInput = document.getElementById('page-h');
+const pageUnitSel = document.getElementById('page-unit');
+
+// 把 mm 值应用到纸框和后端
+function applyPageSize(wMm, hMm) {
+  pageWpx = Math.round(wMm * PIXEL_RATIO);
+  pageHpx = Math.round(hMm * PIXEL_RATIO);
+  if (pageRect) {
+    pageRect.set({ width: pageWpx, height: pageHpx });
+    pageRect.setCoords();
+  }
+  canvas.requestRenderAll();
+  // 通知后端
+  api('/api/set_page', { w_mm: wMm, h_mm: hMm }).catch(() => {});
+}
+
+// 从输入框读取当前值并应用
+function applyPageFromInputs() {
+  let w = parseFloat(pageWInput.value) || 210;
+  let h = parseFloat(pageHInput.value) || 297;
+  if (pageUnitSel.value === 'px') {
+    w = w / PIXEL_RATIO;
+    h = h / PIXEL_RATIO;
+  }
+  applyPageSize(w, h);
+}
+
+// 预设下拉切换
+pagePreset.onchange = () => {
+  const val = pagePreset.value;
+  if (val === 'custom') {
+    // 自定义：输入框可编辑，不自动填值
+    pageWInput.disabled = false;
+    pageHInput.disabled = false;
+    return;
+  }
+  const preset = PAGE_PRESETS[val];
+  if (!preset) return;
+  pageWInput.disabled = false;
+  pageHInput.disabled = false;
+  // 填入预设值（按当前单位）
+  if (pageUnitSel.value === 'mm') {
+    pageWInput.value = preset.w;
+    pageHInput.value = preset.h;
+  } else {
+    pageWInput.value = preset.w * PIXEL_RATIO;
+    pageHInput.value = preset.h * PIXEL_RATIO;
+  }
+  pageWInput.disabled = true;
+  pageHInput.disabled = true;
+  applyPageSize(preset.w, preset.h);
+};
+
+// 单位切换：换算输入框数值
+pageUnitSel.onchange = () => {
+  const w = parseFloat(pageWInput.value) || 0;
+  const h = parseFloat(pageHInput.value) || 0;
+  if (pageUnitSel.value === 'px') {
+    // 从 mm 切换到 px
+    pageWInput.value = Math.round(w * PIXEL_RATIO);
+    pageHInput.value = Math.round(h * PIXEL_RATIO);
+  } else {
+    // 从 px 切换到 mm
+    pageWInput.value = (w / PIXEL_RATIO).toFixed(0);
+    pageHInput.value = (h / PIXEL_RATIO).toFixed(0);
+  }
+};
+
+// 宽高输入框修改（自定义模式）
+pageWInput.onchange = applyPageFromInputs;
+pageHInput.onchange = applyPageFromInputs;
+
+// 初始化：A4 预设，输入框禁用
+pageWInput.disabled = true;
+pageHInput.disabled = true;
+
+// —— 导出 PNG -> /api/export（含框外过滤）——
 document.getElementById('btn-export').onclick = async () => {
-  const items = [...objById.values()].map(o => ({
-    id: o.partId, x: Math.round(o.left / VIEW_SCALE), y: Math.round(o.top / VIEW_SCALE),
-    scale: (o.scaleX || VIEW_SCALE) / VIEW_SCALE
+  // 计算所有零件中哪些完全在纸框内（物理坐标比较）
+  const allParts = [...objById.values()];
+  if (!allParts.length) { setStatus('画布为空'); return; }
+
+  const insideParts = [];
+  const outsideParts = [];
+
+  for (const o of allParts) {
+    // 获取 group 的物理 bbox（不受 viewport 影响）
+    const l = o.left;
+    const t = o.top;
+    const w = o.getScaledWidth();
+    const h = o.getScaledHeight();
+    const r = l + w;
+    const b = t + h;
+    // 判断是否完全在纸框内（含边界）
+    if (l >= 0 && t >= 0 && r <= pageWpx && b <= pageHpx) {
+      insideParts.push(o);
+    } else {
+      outsideParts.push(o);
+    }
+  }
+
+  // 若有框外零件，弹出确认
+  if (outsideParts.length > 0) {
+    const ok = confirm(`有 ${outsideParts.length} 个零件在纸框外，不会被导出，是否继续？`);
+    if (!ok) return;
+  }
+
+  if (!insideParts.length) { setStatus('所有零件均在纸框外，无法导出'); return; }
+
+  const items = insideParts.map(o => ({
+    id: o.partId,
+    x: Math.round(o.left),
+    y: Math.round(o.top),
+    scale: o.scaleX || 1,
   }));
-  if (!items.length) { setStatus('画布为空'); return; }
+
   setStatus('导出中…'); showProgress(0.5);
   try {
     const r = await api('/api/export', { items });
@@ -188,15 +499,22 @@ document.getElementById('btn-export').onclick = async () => {
   finally { hideProgress(); }
 };
 
-// 删除选中
+// —— 删除选中 ——
 document.getElementById('btn-delete').onclick = () => {
   const t = canvas.getActiveObject();
-  if (t && t.partId) { objById.delete(t.partId); partData.delete(t.partId); imgElById.delete(t.partId); canvas.remove(t); canvas.discardActiveObject(); canvas.requestRenderAll(); }
+  if (t && t.partId) {
+    objById.delete(t.partId);
+    partData.delete(t.partId);
+    imgElById.delete(t.partId);
+    canvas.remove(t);
+    canvas.discardActiveObject();
+    canvas.requestRenderAll();
+  }
 };
 
-// 整理排版 -> /api/nest（沿用：位置回填）
+// —— 整理排版 -> /api/nest（位置回填，物理坐标）——
 document.getElementById('btn-tidy').onclick = async () => {
-  const items = [...objById.values()].map(o => ({ id: o.partId, scale: (o.scaleX || VIEW_SCALE) / VIEW_SCALE }));
+  const items = [...objById.values()].map(o => ({ id: o.partId, scale: o.scaleX || 1 }));
   if (!items.length) return;
   setStatus('排版中…'); showProgress(0.5);
   try {
@@ -205,12 +523,19 @@ document.getElementById('btn-tidy').onclick = async () => {
     for (const pos of positions) {
       const o = objById.get(pos.id);
       if (!o || pos.x < 0) continue;
-      o.set({ left: pos.x * VIEW_SCALE, top: pos.y * VIEW_SCALE }); o.setCoords();
+      // 后端返回的已是物理坐标，直接赋值
+      o.set({ left: pos.x, top: pos.y }); o.setCoords();
     }
     canvas.requestRenderAll(); setStatus('排版完成');
   } catch (err) { setStatus('排版失败: ' + err.message); }
   finally { hideProgress(); }
 };
 
-// 切割按钮：本阶段保持占位（切割流程 Phase 5 重做）
+// —— 适应视图按钮 ——
+document.getElementById('btn-fit').onclick = fitView;
+
+// —— 切割按钮：本阶段保持占位 ——
 document.getElementById('btn-cut').onclick = () => setStatus('切割将在后续版本重做');
+
+// 初始 fit-view（仅纸框）
+fitView();
