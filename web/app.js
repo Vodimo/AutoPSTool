@@ -63,7 +63,8 @@ function buildGroup(p) {
     if (p.kind === 'parametric') {
       const outline = parseDToPolyline(p.subject_outline);
       const die = bufferOutline(outline, borderPx);   // 物理像素
-      const minx = Math.min(...die.map(q => q[0])), miny = Math.min(...die.map(q => q[1]));
+      const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
+      const miny = die.reduce((a, q) => Math.min(a, q[1]), Infinity);
       const ringView = die.map(([x, y]) => ({ x: (x - minx) * VIEW_SCALE, y: (y - miny) * VIEW_SCALE }));
       const white = new fabric.Polygon(ringView, { fill: '#fff', stroke: '', selectable: false, evented: false, objectCaching: false });
       const dieLine = new fabric.Polygon(ringView, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false });
@@ -99,12 +100,13 @@ async function addPart(p, x, y) {
 async function rebuildPart(id) {
   const old = objById.get(id);
   if (!old) return;
-  const { left, top, scaleX, angle } = old;
+  const { left, top, scaleX, scaleY, angle } = old;
   const grp = await buildGroup(partData.get(id));
-  grp.set({ left, top, scaleX, scaleY: scaleX, angle });
+  grp.set({ left, top, scaleX, scaleY, angle });
   canvas.remove(old);
   objById.set(id, grp);
   canvas.add(grp);
+  canvas.requestRenderAll();
 }
 
 // 导入图片 -> /api/segment
