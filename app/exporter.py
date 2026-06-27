@@ -11,12 +11,15 @@ def _draw_polyline(draw, pts, fill, width=2):
         draw.line(pts + [pts[0]], fill=fill, width=width)
 
 
-def render_png(parts, offset_mm=None):
-    """A4 RGBA：参数化零件按 offset_mm 缓冲渲染白边+主体+刀模；固定零件用既有图层。"""
+def render_png(parts, offset_mm=None, page_px=None):
+    """RGBA 画布：参数化零件按 offset_mm 缓冲渲染白边+主体+刀模；固定零件用既有图层。
+    page_px=(宽,高) 指定输出分辨率，默认 A4 (2100×2970)。"""
     if offset_mm is None:
         offset_mm = g.OFFSET_MM
+    if page_px is None:
+        page_px = (g.A4_WIDTH_PX, g.A4_HEIGHT_PX)
     offset_px = g.mm_to_px(offset_mm)
-    canvas = Image.new("RGBA", (g.A4_WIDTH_PX, g.A4_HEIGHT_PX), (255, 255, 255, 255))
+    canvas = Image.new("RGBA", page_px, (255, 255, 255, 255))
     draw = ImageDraw.Draw(canvas)
 
     for part in parts:
@@ -64,5 +67,5 @@ def render_png(parts, offset_mm=None):
     return canvas
 
 
-def save_png(parts, out_path, offset_mm=None):
-    render_png(parts, offset_mm=offset_mm).save(out_path)
+def save_png(parts, out_path, offset_mm=None, page_px=None):
+    render_png(parts, offset_mm=offset_mm, page_px=page_px).save(out_path)

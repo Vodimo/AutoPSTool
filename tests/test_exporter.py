@@ -69,3 +69,15 @@ def test_render_offset_grows_white_and_magenta_extent():
 
     ea, eb = magenta_extent(a), magenta_extent(b)
     assert ea > 0 and eb > ea          # 白边越大，刀模外延越大
+
+
+def test_render_custom_page_size():
+    """render_png page_px 参数：自定义尺寸返回对应 PIL 图；默认仍 A4。"""
+    p = _para_part()
+    # 自定义页面尺寸 800×600
+    img_custom = exporter.render_png([p], page_px=(800, 600))
+    assert img_custom.size == (800, 600), f"期望 (800,600)，实际 {img_custom.size}"
+    # 默认仍为 A4
+    img_default = exporter.render_png([p])
+    assert img_default.size == (g.A4_WIDTH_PX, g.A4_HEIGHT_PX), \
+        f"期望 A4 ({g.A4_WIDTH_PX},{g.A4_HEIGHT_PX})，实际 {img_default.size}"

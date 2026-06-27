@@ -59,6 +59,24 @@ def test_set_border_updates_session():
     assert server.OFFSET_MM == 5.5
 
 
+def test_set_page_updates_session():
+    """POST /api/set_page 更新全局 PAGE_W_MM / PAGE_H_MM；非法请求返回 400。"""
+    client = server.app.test_client()
+    # 正常更新
+    r = client.post("/api/set_page", json={"w_mm": 148, "h_mm": 210})
+    assert r.status_code == 200, f"期望 200，实际 {r.status_code}"
+    data = r.get_json()
+    assert data["ok"] is True
+    assert server.PAGE_W_MM == 148
+    assert server.PAGE_H_MM == 210
+    # 缺少字段 → 400
+    r2 = client.post("/api/set_page", json={"w_mm": 210})
+    assert r2.status_code == 400, f"缺 h_mm 应返回 400，实际 {r2.status_code}"
+    # 非正数 → 400
+    r3 = client.post("/api/set_page", json={"w_mm": 0, "h_mm": 210})
+    assert r3.status_code == 400, f"w_mm=0 应返回 400，实际 {r3.status_code}"
+
+
 def test_segment_returns_subject_fields():
     import numpy as np, cv2, base64
     img = np.full((300, 300, 3), 255, np.uint8)

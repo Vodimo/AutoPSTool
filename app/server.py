@@ -17,6 +17,8 @@ app = Flask(__name__, static_folder=None)
 
 PARTS = {}  # id -> Part（单用户本地工具，内存会话足够）
 OFFSET_MM = g.OFFSET_MM  # 全局白边(会话级)，前端 /api/set_border 同步
+PAGE_W_MM = 210           # 全局纸张宽度(mm)，前端 /api/set_page 同步
+PAGE_H_MM = 297           # 全局纸张高度(mm)
 
 
 def _decode_image(b64: str):
@@ -128,6 +130,20 @@ def api_set_border():
     return jsonify({"ok": True, "offset_mm": OFFSET_MM})
 
 
+@app.route("/api/set_page", methods=["POST"])
+def api_set_page():
+    """设置全局纸张尺寸（毫米）。两个字段均必须存在且为正数。"""
+    global PAGE_W_MM, PAGE_H_MM
+    d = _require_json("w_mm", "h_mm")
+    w = float(d["w_mm"])
+    h = float(d["h_mm"])
+    if w <= 0 or h <= 0:
+        abort(400, description="w_mm 和 h_mm 必须大于 0")
+    PAGE_W_MM = w
+    PAGE_H_MM = h
+    return jsonify({"ok": True, "w_mm": PAGE_W_MM, "h_mm": PAGE_H_MM})
+
+
 @app.route("/api/export", methods=["POST"])
 def api_export():
     items = _require_json("items")["items"]
@@ -138,7 +154,8 @@ def api_export():
             continue
         p.x, p.y, p.scale = int(it["x"]), int(it["y"]), it.get("scale", 1.0)
         parts.append(p)
-    img = exporter.render_png(parts, offset_mm=OFFSET_MM)
+    img = exporter.render_png(parts, offset_mm=OFFSET_MM,
+                               page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
