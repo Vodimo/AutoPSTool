@@ -96,3 +96,22 @@ def test_build_part_has_subject_image_and_outline():
     assert part.subject_image[0, 0, 3] == 0          # 角落透明
     # 主体轮廓：非空且含曲线
     assert part.subject_outline and "C" in part.subject_outline.upper()
+
+
+def test_materialize_parametric_then_cut():
+    """参数化零件实体化后可正常切割，切出的两块为固定零件(无 subject_outline)。"""
+    img, mask = _single_subject()
+    p = pb.build_part(img, mask, offset_mm=2.0, part_id="mat1")
+    # build_part 产出参数化零件
+    assert p.subject_image is not None
+    # 实体化：产出含 image_layer 和 mask 的新零件
+    mp = pb.materialize_parametric(p, offset_mm=2.0)
+    assert mp.mask is not None and mp.image_layer is not None
+    # 切割实体化后的零件
+    a, b = pb.cut_part(mp, (mp.w // 2, 0), (mp.w // 2, mp.h), bleed_mm=1.5)
+    # 两块均非空，各有刀模路径
+    assert a is not None and b is not None
+    assert a.dieline_path and b.dieline_path
+    # 切割产出的两块为固定零件（_rebuild_from_die 不设 subject_outline）
+    assert a.subject_outline == ""
+    assert b.subject_outline == ""

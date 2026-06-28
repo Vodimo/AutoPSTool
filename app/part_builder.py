@@ -92,6 +92,16 @@ def _rebuild_from_die(layer_rgba, die_mask, part_id):
                 contour=contour, dieline_path=dieline_path)
 
 
+def materialize_parametric(part, offset_mm=None):
+    """把参数化零件（含 subject_image）实体化为固定零件（image_layer+mask）。
+    用于切割前将带白边预览的参数化零件转为可切割的固定零件。
+    """
+    si = part.subject_image
+    bgr = cv2.cvtColor(si[:, :, :3], cv2.COLOR_RGB2BGR)
+    mask = (si[:, :, 3] > 0).astype(np.uint8) * 255
+    return build_part(bgr, mask, offset_mm=offset_mm, part_id=part.id)
+
+
 def cut_part(part, p1, p2, bleed_mm=None):
     """沿 p1->p2 把零件切成两块，切口两侧重叠 bleed，切口平直。"""
     if bleed_mm is None:

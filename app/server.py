@@ -17,6 +17,7 @@ app = Flask(__name__, static_folder=None)
 
 PARTS = {}  # id -> Part（单用户本地工具，内存会话足够）
 OFFSET_MM = g.OFFSET_MM  # 全局白边(会话级)，前端 /api/set_border 同步
+BLEED_MM = g.BLEED_MM    # 全局切割出血(会话级)，前端 /api/set_bleed 同步
 PAGE_W_MM = 210           # 全局纸张宽度(mm)，前端 /api/set_page 同步
 PAGE_H_MM = 297           # 全局纸张高度(mm)
 
@@ -91,21 +92,39 @@ def api_segment():
     return jsonify({"parts": out})
 
 
+@app.route("/api/set_bleed", methods=["POST"])
+def api_set_bleed():
+    """设置全局切割出血量（毫米）。必须大于 0。"""
+    global BLEED_MM
+    d = _require_json("bleed_mm")
+    val = float(d["bleed_mm"])
+    if val <= 0:
+        abort(400, description="bleed_mm 必须大于 0")
+    BLEED_MM = val
+    return jsonify({"ok": True, "bleed_mm": BLEED_MM})
+
+
 @app.route("/api/cut", methods=["POST"])
 def api_cut():
+    """切割零件：commit=false 仅预览（不改 PARTS），commit=true 删原件加两块。"""
     d = _require_json("id", "x1", "y1", "x2", "y2")
+    commit = bool(d.get("commit", False))
     part = PARTS.get(d["id"])
     if part is None:
         return jsonify({"error": "part not found"}), 404
-    a, b = part_builder.cut_part(part, (d["x1"], d["y1"]), (d["x2"], d["y2"]))
-    del PARTS[d["id"]]
-    res = []
-    for np_ in (a, b):
-        if np_ is None:
-            continue
-        PARTS[np_.id] = np_
-        res.append(part_to_dict(np_))
-    return jsonify({"parts": res})
+    # 参数化零件先实体化，固定零件直接使用
+    if part.subject_outline:
+        mp = part_builder.materialize_parametric(part, OFFSET_MM)
+    else:
+        mp = part
+    a, b = part_builder.cut_part(mp, (d["x1"], d["y1"]), (d["x2"], d["y2"]),
+                                  bleed_mm=BLEED_MM)
+    pieces = [x for x in (a, b) if x is not None]
+    if commit:
+        del PARTS[d["id"]]
+        for piece in pieces:
+            PARTS[piece.id] = piece
+    return jsonify({"parts": [part_to_dict(p) for p in pieces]})
 
 
 @app.route("/api/nest", methods=["POST"])
