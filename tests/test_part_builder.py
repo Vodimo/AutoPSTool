@@ -89,13 +89,73 @@ def test_cut_pieces_have_vector_dieline():
 def test_build_part_has_subject_image_and_outline():
     img, mask = _single_subject()
     part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
-    # 主体图：透明底、RGBA、裁到主体(不含白边，应比含白边的 image_layer 小)
+    # 主体图：透明底、RGBA（帧已含 SUBJECT_MARGIN，不再要求比 image_layer 小）
     assert part.subject_image is not None
     assert part.subject_image.shape[2] == 4
-    assert part.subject_image.shape[0] <= part.image_layer.shape[0]
     assert part.subject_image[0, 0, 3] == 0          # 角落透明
     # 主体轮廓：非空且含曲线
     assert part.subject_outline and "C" in part.subject_outline.upper()
+
+
+def test_build_part_has_source_and_editmask():
+    """build_part 应产出 source_bgr 与 edit_mask，且它们与 subject_image 同帧。"""
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
+    assert part.source_bgr is not None
+    assert part.edit_mask is not None
+    # edit_mask 与 subject_image 同尺寸
+    assert part.edit_mask.shape[:2] == part.subject_image.shape[:2]
+
+
+def test_apply_brush_erase_split():
+    """擦断哑铃 mask 的细桥 → apply_brush 返回 2 个零件。"""
+    # 构造哑铃：两个圆 + 细桥
+    size = (300, 400)
+    h, w = size
+    mask = np.zeros((h, w), np.uint8)
+    cv2.circle(mask, (80, 150), 60, 255, -1)          # 左圆
+    cv2.circle(mask, (320, 150), 60, 255, -1)          # 右圆
+    cv2.rectangle(mask, (80, 140), (320, 160), 255, -1)  # 细桥（高 20px）
+
+    img = np.full((h, w, 3), 255, np.uint8)  # 白底图
+
+    part = pb.build_part(img, mask, offset_mm=2.0)
+
+    # 笔迹 stroke：覆盖桥中央，与 edit_mask 同尺寸
+    em_h, em_w = part.edit_mask.shape
+    stroke = np.zeros((em_h, em_w), np.uint8)
+    # 桥在 padded 帧中央区域；画一个足够宽的白色矩形确保覆盖桥
+    mid_x = em_w // 2
+    cv2.rectangle(stroke, (mid_x - 20, 0), (mid_x + 20, em_h), 255, -1)
+
+    pieces = pb.apply_brush(part, stroke, "erase")
+    assert len(pieces) == 2, f"擦断细桥应分裂为 2 块，实际返回 {len(pieces)} 块"
+
+
+def test_apply_brush_add_grows():
+    """'add' 模式把笔迹区域加入 mask，分量面积应增大。"""
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0)
+
+    em_h, em_w = part.edit_mask.shape
+    orig_area = int(np.count_nonzero(part.edit_mask))
+
+    # 先擦掉一块(左半)
+    erase_stroke = np.zeros((em_h, em_w), np.uint8)
+    erase_stroke[:, :em_w // 2] = 255
+    erased = pb.apply_brush(part, erase_stroke, "erase")
+    assert len(erased) >= 1
+
+    # 再加回(同一笔迹)→ 面积应大于擦后
+    if len(erased) == 1:
+        erased_part = erased[0]
+        erased_area = int(np.count_nonzero(erased_part.edit_mask))
+        add_stroke = np.zeros((erased_part.edit_mask.shape[0], erased_part.edit_mask.shape[1]), np.uint8)
+        # 对 erased_part 的帧，在右侧加白笔迹
+        add_stroke[:, erased_part.edit_mask.shape[1] // 2:] = 255
+        added = pb.apply_brush(erased_part, add_stroke, "add")
+        added_area = sum(int(np.count_nonzero(p.edit_mask)) for p in added)
+        assert added_area > erased_area, "add 笔迹后面积应增大"
 
 
 def test_materialize_parametric_then_cut():

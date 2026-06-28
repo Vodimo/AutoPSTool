@@ -119,6 +119,31 @@ def test_set_bleed():
     assert r3.status_code == 400, f"bleed_mm=-1 应返回 400，实际 {r3.status_code}"
 
 
+def test_brush_endpoint():
+    """POST /api/brush：erase 笔迹→200，返回 parts，旧 id 从 PARTS 删除。"""
+    part = _make_parametric_part("brushtest")
+    client = server.app.test_client()
+
+    # 构造与 edit_mask 同尺寸的笔迹 PNG（一小块白色）
+    em_h, em_w = part.edit_mask.shape
+    stroke_img = np.zeros((em_h, em_w), np.uint8)
+    # 涂一个小白块（避免全擦，只擦掉边角）
+    cv2.rectangle(stroke_img, (0, 0), (10, 10), 255, -1)
+    ok, buf = cv2.imencode(".png", stroke_img)
+    stroke_b64 = "data:image/png;base64," + base64.b64encode(buf).decode()
+
+    r = client.post("/api/brush", json={"id": "brushtest", "stroke_b64": stroke_b64, "mode": "erase"})
+    assert r.status_code == 200, f"期望 200，实际 {r.status_code}: {r.data}"
+    data = r.get_json()
+    assert "parts" in data, "响应应含 parts 字段"
+    assert len(data["parts"]) >= 1, "擦小角应至少返回 1 个零件"
+    # 旧 id 应从 PARTS 删除
+    assert "brushtest" not in server.PARTS, "旧 id 应已从 PARTS 删除"
+    # 新零件应已入库
+    for p in data["parts"]:
+        assert p["id"] in server.PARTS, f"新零件 {p['id']} 应已入库"
+
+
 def test_cut_preview_no_mutate():
     """commit=false 仅预览不改 PARTS；commit=true 删原件加两块。"""
     part = _make_parametric_part("cutprev")

@@ -12,6 +12,8 @@ class Part:
     dieline_path: str = ""               # potrace 矢量刀模路径(局部坐标 SVG d)
     subject_image: "np.ndarray | None" = None   # 纯主体 RGBA(透明底,不含白边)
     subject_outline: str = ""                    # 主体掩膜矢量轮廓(主体 bbox 局部坐标)
+    source_bgr: "np.ndarray | None" = None      # 主体帧 BGR 原色(未掩膜,与 edit_mask 同帧)
+    edit_mask: "np.ndarray | None" = None       # 主体帧 0/255 掩膜(与 subject_image 同帧)
     x: int = 0
     y: int = 0
     scale: float = 1.0

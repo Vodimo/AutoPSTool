@@ -127,6 +127,57 @@ def api_cut():
     return jsonify({"parts": [part_to_dict(p) for p in pieces]})
 
 
+def _decode_mask_b64(b64: str, target_wh=None):
+    """把 data-url base64 PNG 解码为单通道 0/255 掩膜。
+    若 target_wh=(w,h) 与解码尺寸不一致，用最近邻插值 resize。
+    """
+    if "," in b64:
+        b64 = b64.split(",", 1)[1]
+    data = base64.b64decode(b64)
+    arr = np.frombuffer(data, np.uint8)
+    gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        abort(400, description="无法解码笔迹掩膜")
+    if target_wh is not None:
+        tw, th = target_wh
+        if gray.shape[1] != tw or gray.shape[0] != th:
+            gray = cv2.resize(gray, (tw, th), interpolation=cv2.INTER_NEAREST)
+    return gray
+
+
+@app.route("/api/brush", methods=["POST"])
+def api_brush():
+    """手动修补画笔：对零件的 edit_mask 应用笔迹，重算白边/刀模，可能分裂为多块。
+    请求体：{id, stroke_b64, mode}
+      - id: 零件 id
+      - stroke_b64: 与 subject_image 同尺寸的笔迹掩膜 PNG（白=涂抹处）data-url base64
+      - mode: 'add' | 'erase'
+    返回：{parts: [...]}，旧 id 从 PARTS 删除，新块入库。
+    """
+    d = _require_json("id", "stroke_b64", "mode")
+    part = PARTS.get(d["id"])
+    if part is None:
+        return jsonify({"error": "part not found"}), 404
+    if part.edit_mask is None or part.source_bgr is None:
+        abort(400, description="该零件不含 edit_mask/source_bgr，无法修补")
+
+    em_h, em_w = part.edit_mask.shape
+    stroke = _decode_mask_b64(d["stroke_b64"], target_wh=(em_w, em_h))
+
+    mode = d["mode"]
+    if mode not in ("add", "erase"):
+        abort(400, description="mode 必须是 'add' 或 'erase'")
+
+    pieces = part_builder.apply_brush(part, stroke, mode)
+
+    # 用新零件替换旧件（全擦没时也删原件）
+    del PARTS[d["id"]]
+    for p in pieces:
+        PARTS[p.id] = p
+
+    return jsonify({"parts": [part_to_dict(p) for p in pieces]})
+
+
 @app.route("/api/nest", methods=["POST"])
 def api_nest():
     items = _require_json("items")["items"]

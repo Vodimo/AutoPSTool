@@ -8,6 +8,9 @@ from app import cv_helpers as ch
 from app import vectorize as vz
 from app.models import Part
 
+# 主体帧边距：subject_image / source_bgr / edit_mask 在主体 bbox 外扩此像素
+SUBJECT_MARGIN = 60
+
 
 def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None) -> Part:
     """把单个主体掩膜做成零件。subject_mask 为全图坐标 0/255。"""
@@ -18,8 +21,8 @@ def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None) -> Part:
 
     offset_px = g.mm_to_px(offset_mm)
 
-    # 防越界：先在四周补一圈安全垫
-    pad = offset_px + 4
+    # 防越界：先在四周补一圈安全垫(至少覆盖 SUBJECT_MARGIN)
+    pad = max(offset_px + 4, SUBJECT_MARGIN + 4)
     img = cv2.copyMakeBorder(image_bgr, pad, pad, pad, pad,
                              cv2.BORDER_CONSTANT, value=(255, 255, 255))
     msk = cv2.copyMakeBorder(subject_mask, pad, pad, pad, pad,
@@ -54,22 +57,32 @@ def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None) -> Part:
 
     dieline_path = vz.trace_mask(crop_die)
 
-    # 额外产出"纯主体图(透明底)"与"主体轮廓"，供前端参数化白边
+    # 额外产出"主体帧(padded bbox)"：source_bgr / edit_mask / subject_image / subject_outline
+    # 主体帧 = 主体 bbox 外扩 SUBJECT_MARGIN 并 clamp 到 padded 图边界
+    M = SUBJECT_MARGIN
     sx, sy, sw, sh = cv2.boundingRect(msk)
-    subj_mask_crop = msk[sy:sy + sh, sx:sx + sw]
-    subj_img_bgr = img[sy:sy + sh, sx:sx + sw]
-    subject_image = np.zeros((sh, sw, 4), np.uint8)
-    sb, sg, sr = cv2.split(subj_img_bgr)
-    sm = subj_mask_crop > 0
-    subject_image[sm, 0] = sr[sm]
-    subject_image[sm, 1] = sg[sm]
-    subject_image[sm, 2] = sb[sm]
+    x0 = max(0, sx - M)
+    y0 = max(0, sy - M)
+    x1 = min(img.shape[1], sx + sw + M)
+    y1 = min(img.shape[0], sy + sh + M)
+    source_bgr = img[y0:y1, x0:x1].copy()      # BGR 全色（未掩膜）
+    edit_mask  = msk[y0:y1, x0:x1].copy()      # 0/255 掩膜，与 source_bgr 同帧
+
+    # subject_image：同帧 RGBA，主体像素着色，其余透明
+    fh, fw = edit_mask.shape
+    subject_image = np.zeros((fh, fw, 4), np.uint8)
+    sb2, sg2, sr2 = cv2.split(source_bgr)
+    sm = edit_mask > 0
+    subject_image[sm, 0] = sr2[sm]
+    subject_image[sm, 1] = sg2[sm]
+    subject_image[sm, 2] = sb2[sm]
     subject_image[sm, 3] = 255
-    subject_outline = vz.trace_mask(subj_mask_crop)
+    subject_outline = vz.trace_mask(edit_mask)
 
     return Part(id=part_id, image_layer=layer, mask=crop_die,
                 contour=contour, dieline_path=dieline_path,
-                subject_image=subject_image, subject_outline=subject_outline)
+                subject_image=subject_image, subject_outline=subject_outline,
+                source_bgr=source_bgr, edit_mask=edit_mask)
 
 
 def _rebuild_from_die(layer_rgba, die_mask, part_id):
@@ -100,6 +113,34 @@ def materialize_parametric(part, offset_mm=None):
     bgr = cv2.cvtColor(si[:, :, :3], cv2.COLOR_RGB2BGR)
     mask = (si[:, :, 3] > 0).astype(np.uint8) * 255
     return build_part(bgr, mask, offset_mm=offset_mm, part_id=part.id)
+
+
+def apply_brush(part, stroke_mask, mode) -> list:
+    """把笔迹掩膜应用到零件的 edit_mask 上，返回新零件列表（可能分裂为多块）。
+
+    Args:
+        part: 含 source_bgr 与 edit_mask 的参数化零件。
+        stroke_mask: 与 edit_mask 同尺寸的 0/255 uint8 掩膜（白=涂抹处）。
+        mode: 'add' 或 'erase'。
+
+    Returns:
+        新零件列表（每个连通分量一个）；若全擦没则返回 []。
+    """
+    em = part.edit_mask.copy()
+    # 二值化笔迹
+    _, st = cv2.threshold(stroke_mask, 127, 255, cv2.THRESH_BINARY)
+    if mode == "add":
+        em = cv2.bitwise_or(em, st)
+    else:  # erase
+        em = cv2.bitwise_and(em, cv2.bitwise_not(st))
+
+    em = ch.clean_edges(em)
+    comps = ch.separate_components(em, min_area=800)
+    out = []
+    for c in comps:
+        # 复用 build_part：source_bgr 帧 + 该连通分量的掩膜，重新推导白边/刀模/参数化
+        out.append(build_part(part.source_bgr, c))
+    return out
 
 
 def cut_part(part, p1, p2, bleed_mm=None):
