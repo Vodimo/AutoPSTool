@@ -39,7 +39,8 @@ def test_nest_returns_positions():
                                                       {"id": "b", "scale": 1.0}]})
     assert resp.status_code == 200
     pos = {p["id"]: p for p in resp.get_json()["positions"]}
-    assert pos["a"]["x"] >= 0 and pos["b"]["x"] >= 0
+    # 新契约：返回 cx/cy（视觉中心）而非 x/y（左上角）
+    assert pos["a"]["cx"] >= 0 and pos["b"]["cx"] >= 0
 
 
 def test_export_returns_png():

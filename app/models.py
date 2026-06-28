@@ -20,6 +20,7 @@ class Part:
     rotation: float = 0.0
     cx: "float | None" = None
     cy: "float | None" = None
+    locked: bool = False
 
     @property
     def w(self) -> int:

@@ -178,16 +178,37 @@ def api_brush():
 
 @app.route("/api/nest", methods=["POST"])
 def api_nest():
-    items = _require_json("items")["items"]
+    d = _require_json("items")
+    items = d["items"]
+    spacing_mm = float(d.get("spacing_mm", g.PADDING_MM))
+    angle_steps = int(d.get("angle_steps", 8))
+    uniform_scale = bool(d.get("uniform_scale", False))
+
     parts = []
     for it in items:
         p = PARTS.get(it["id"])
         if p is None:
             continue
-        p.scale = it.get("scale", 1.0)
+        p.scale = float(it.get("scale", 1.0))
+        p.rotation = float(it.get("angle", 0.0))
+        p.locked = bool(it.get("locked", False))
         parts.append(p)
-    nesting.nest(parts)
-    return jsonify({"positions": [{"id": p.id, "x": p.x, "y": p.y} for p in parts]})
+
+    nesting.nest(
+        parts,
+        offset_mm=OFFSET_MM,
+        spacing_mm=spacing_mm,
+        angle_steps=angle_steps,
+        uniform_scale=uniform_scale,
+        page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)),
+    )
+
+    return jsonify({
+        "positions": [
+            {"id": p.id, "cx": p.cx, "cy": p.cy, "angle": p.rotation, "scale": p.scale}
+            for p in parts
+        ]
+    })
 
 
 @app.route("/api/set_border", methods=["POST"])
