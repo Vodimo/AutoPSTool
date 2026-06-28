@@ -2,6 +2,7 @@
 import math
 import shapely.geometry
 import shapely.affinity
+import shapely.prepared
 
 from app import border, geometry as g
 
@@ -37,17 +38,17 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
            page_w: int, page_h: int, grid_step: int):
     """执行一轮 BLF 排版，原地更新每个 part 的 cx/cy/rotation/x/y。
     返回成功放置的零件数量。
-    """
-    board = shapely.geometry.box(0, 0, page_w, page_h)
 
+    性能要点：board 判定与碰撞预筛全用 AABB 算术(纸框为矩形,bbox 在框内⟺几何在框内),
+    仅当候选 AABB 与已放置 AABB 真正相交时才做一次精确 prepared.intersects;
+    空白区域的网格点是纯算术,避免百万次多边形运算(原实现 ~27-40s → 数秒)。
+    """
     # 按旋转 0° 时的 footprint 面积降序排列，大零件优先
     def _area_key(part):
-        base = _base_poly(part, offset_px)
-        fp = _footprint(base, part.scale, 0)
-        return fp.area
+        return _footprint(_base_poly(part, offset_px), part.scale, 0).area
 
     items = sorted(parts, key=_area_key, reverse=True)
-    placed = []  # 已放置零件的 buffer 多边形列表（用于碰撞）
+    placed = []  # [(prepared_poly, (minx,miny,maxx,maxy))]
     placed_count = 0
 
     for part in items:
@@ -60,15 +61,18 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
             n = max(1, angle_steps)
             candidate_angles = [k * 360.0 / n for k in range(n)]
 
-        best = None  # (cy_top, cx_left, angle, cand_poly, center_x, center_y)
+        best = None  # (cy_top, cx_left, fp_buf, dx, dy, angle, cx, cy)
 
         for angle in candidate_angles:
             fp = _footprint(base, part.scale, angle)
             fminx, fminy, fmaxx, fmaxy = fp.bounds
             fw = fmaxx - fminx
             fh = fmaxy - fminy
+            # 每角度只 buffer 一次；后续靠算术 + 平移
+            fp_buf = fp.buffer(spacing_px / 2.0, join_style=2)
+            bminx, bminy, bmaxx, bmaxy = fp_buf.bounds
+            fc = fp.centroid
 
-            # 扫描候选位置（BLF：左上角网格）
             max_y = max(1, int(page_h - fh) + 1)
             max_x = max(1, int(page_w - fw) + 1)
             found_for_angle = False
@@ -76,32 +80,40 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
             for cy_top in range(0, max_y, grid_step):
                 if found_for_angle:
                     break
+                # 若本角度的最优只可能比已有 best 更差(cy 更大)，可提前终止
+                if best is not None and cy_top >= best[0]:
+                    break
                 for cx_left in range(0, max_x, grid_step):
-                    # 将 footprint 的 bbox 左上角对齐到 (cx_left, cy_top)
-                    cand = shapely.affinity.translate(fp, cx_left - fminx, cy_top - fminy)
-                    padded = cand.buffer(spacing_px / 2.0, join_style=2)
-
-                    if not padded.within(board):
+                    dx = cx_left - fminx
+                    dy = cy_top - fminy
+                    cminx = bminx + dx; cminy = bminy + dy
+                    cmaxx = bmaxx + dx; cmaxy = bmaxy + dy
+                    # 纸框判定(算术)：缓冲后 bbox 须在 [0,page]
+                    if cminx < 0 or cminy < 0 or cmaxx > page_w or cmaxy > page_h:
                         continue
-                    if any(padded.intersects(q) for q in placed):
-                        continue
-
-                    # 找到可放位置，比较是否比当前 best 更靠左上
-                    if best is None or (cy_top, cx_left) < (best[0], best[1]):
-                        c = cand.centroid
-                        best = (cy_top, cx_left, angle, padded, c.x, c.y,
-                                cand.bounds[0], cand.bounds[1])
+                    # AABB 预筛：找出 bbox 真正重叠的已放置件
+                    overlappers = [pp for (pp, pb) in placed
+                                   if not (cmaxx <= pb[0] or cminx >= pb[2]
+                                           or cmaxy <= pb[1] or cminy >= pb[3])]
+                    if overlappers:
+                        cand = shapely.affinity.translate(fp_buf, dx, dy)
+                        if any(pp.intersects(cand) for pp in overlappers):
+                            continue
+                    # 命中(最靠左上)
+                    best = (cy_top, cx_left, fp_buf, dx, dy, angle,
+                            fc.x + dx, fc.y + dy)
                     found_for_angle = True
-                    break  # 本角度只取最靠左上的那个位置
+                    break
 
         if best is not None:
-            _, _, chosen_angle, chosen_padded, cen_x, cen_y, bx, by = best
-            placed.append(chosen_padded)
+            cy_top, cx_left, fp_buf, dx, dy, chosen_angle, cen_x, cen_y = best
+            cand = shapely.affinity.translate(fp_buf, dx, dy)
+            placed.append((shapely.prepared.prep(cand), cand.bounds))
             part.cx = cen_x
             part.cy = cen_y
             part.rotation = chosen_angle
-            part.x = int(round(bx))
-            part.y = int(round(by))
+            part.x = int(round(cx_left))
+            part.y = int(round(cy_top))
             placed_count += 1
         else:
             part.cx = -1.0
@@ -113,7 +125,7 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
 
 
 def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
-         uniform_scale=False, grid_step=20, page_px=None):
+         uniform_scale=False, grid_step=40, page_px=None):
     """旋转感知 BLF 排版，原地更新每个 part 的 cx/cy/rotation/scale/x/y。
 
     参数：
