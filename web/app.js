@@ -869,5 +869,248 @@ async function confirmCut() {
   }
 }
 
+// ============================================================
+// 修补画笔模式（Phase 6 Task 2）
+// ============================================================
+
+// 笔刷大小标签同步
+const brushSizeEl  = document.getElementById('brush-size');
+const brushSizeLbl = document.getElementById('brush-size-label');
+brushSizeEl.oninput = () => { brushSizeLbl.textContent = brushSizeEl.value; };
+
+// 修补模式状态变量
+let brushMode     = false;   // 是否处于修补画笔模式
+let brushPainting = false;   // 当前是否正在涂抹（mouse down 中）
+let brushTarget   = null;    // 正在涂抹的 group 对象
+let brushCanvas   = null;    // 离屏 canvas（subject_image 像素尺寸）
+let brushCtx      = null;    // 对应 2D 上下文
+let brushOverlays = [];      // 临时叠加的 fabric.Circle 预览对象
+
+// 进入修补画笔模式
+function enterBrushMode() {
+  // 若处于切割模式，先退出
+  if (cutMode) exitCutMode();
+  brushMode = true;
+  document.getElementById('btn-brush').classList.add('active');
+  // 锁住所有零件拖拽（和 cutMode 一样）
+  canvas.getObjects().forEach(o => {
+    if (o.partId) { o.lockMovementX = true; o.lockMovementY = true; }
+  });
+  // 禁止框选
+  canvas.selection = false;
+  setStatus('修补：选中一个零件，在其上涂抹（加/擦）');
+}
+
+// 退出修补画笔模式
+function exitBrushMode() {
+  brushMode = false;
+  document.getElementById('btn-brush').classList.remove('active');
+  // 恢复零件拖拽
+  canvas.getObjects().forEach(o => {
+    if (o.partId) { o.lockMovementX = false; o.lockMovementY = false; }
+  });
+  canvas.selection = true;
+  // 清除状态
+  brushPainting = false;
+  brushTarget   = null;
+  brushCanvas   = null;
+  brushCtx      = null;
+  clearBrushOverlays();
+  setStatus('已退出修补模式');
+}
+
+// 清除画布上的笔迹预览圆点
+function clearBrushOverlays() {
+  for (const o of brushOverlays) canvas.remove(o);
+  brushOverlays = [];
+  canvas.requestRenderAll();
+}
+
+// 「修补」按钮切换
+document.getElementById('btn-brush').onclick = () => {
+  if (brushMode) exitBrushMode();
+  else enterBrushMode();
+};
+
+// B 键切换（忽略在输入框中按键）
+window.addEventListener('keydown', (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (e.key === 'b' || e.key === 'B') {
+    if (brushMode) exitBrushMode();
+    else enterBrushMode();
+  }
+});
+
+// Esc 退出修补模式
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && brushMode && !brushPainting) {
+    exitBrushMode();
+  }
+});
+
+// 计算 subject_image 像素坐标（场景物理坐标 → subject_image px）
+// group._objects = [white(0), img(1), dieLine(2)]（参数化）；img.left = -minx（die bbox 左偏移）
+function sceneToSubjectPx(group, sceneX, sceneY) {
+  const pd  = partData.get(group.partId);
+  if (!pd) return null;
+  // group 内 img 的 left/top（subject_image 在 group 内位置 = -minx, -miny）
+  const objs = group._objects;
+  // 参数化 group 的 image 子对象在索引 1
+  const imgChild = objs && objs.length >= 2 ? objs[1] : null;
+  if (!imgChild) return null;
+  // subject_image 左上角在场景（物理）坐标：
+  // group.left = die bbox minx（group 原点），img.left = -minx → subject_image 原点 = group.left + img.left * group.scaleX
+  const scaleX = group.scaleX || 1;
+  const scaleY = group.scaleY || 1;
+  const subjOriginX = group.left + imgChild.left * scaleX;
+  const subjOriginY = group.top  + imgChild.top  * scaleY;
+  const px = (sceneX - subjOriginX) / scaleX;
+  const py = (sceneY - subjOriginY) / scaleY;
+  // 边界钳位
+  const w  = pd.w || 0;
+  const h  = pd.h || 0;
+  return {
+    x: Math.max(0, Math.min(w, px)),
+    y: Math.max(0, Math.min(h, py)),
+    w,
+    h,
+  };
+}
+
+// 在离屏 canvas 上画一个白色圆点（笔迹记录）
+function paintDot(px, py) {
+  if (!brushCtx) return;
+  const r = parseInt(brushSizeEl.value, 10) / 2;
+  brushCtx.beginPath();
+  brushCtx.arc(px, py, r, 0, Math.PI * 2);
+  brushCtx.fillStyle = '#ffffff';
+  brushCtx.fill();
+}
+
+// 在主画布上添加半透明预览圆（green/red）
+function addOverlayDot(sceneX, sceneY, group) {
+  const mode   = document.getElementById('brush-mode').value;
+  const color  = mode === 'add' ? 'rgba(0,200,0,0.4)' : 'rgba(220,0,0,0.4)';
+  const radius = (parseInt(brushSizeEl.value, 10) / 2) * (group.scaleX || 1);
+  const dot = new fabric.Circle({
+    left: sceneX - radius,
+    top:  sceneY - radius,
+    radius,
+    fill: color,
+    selectable: false,
+    evented: false,
+    excludeFromExport: true,
+    objectCaching: false,
+  });
+  canvas.add(dot);
+  brushOverlays.push(dot);
+}
+
+// mouse:down — 修补画笔
+canvas.on('mouse:down', function (opt) {
+  if (!brushMode || isPanning) return;
+
+  const target = opt.target;
+  // 必须命中一个零件 group（参数化）
+  if (!target || !target.partId) {
+    setStatus('修补：请先点选一个零件，再涂抹');
+    return;
+  }
+  const pd = partData.get(target.partId);
+  if (!pd || pd.kind !== 'parametric') {
+    setStatus('修补：仅支持参数化零件');
+    return;
+  }
+
+  // 初始化离屏 canvas（subject_image 原生像素尺寸）
+  brushTarget = target;
+  brushCanvas = document.createElement('canvas');
+  brushCanvas.width  = pd.w;
+  brushCanvas.height = pd.h;
+  brushCtx = brushCanvas.getContext('2d');
+  brushPainting = true;
+
+  const ptr = canvas.getPointer(opt.e);
+  const sp  = sceneToSubjectPx(target, ptr.x, ptr.y);
+  if (sp) {
+    paintDot(sp.x, sp.y);
+    addOverlayDot(ptr.x, ptr.y, target);
+    canvas.requestRenderAll();
+  }
+});
+
+// mouse:move — 修补画笔
+canvas.on('mouse:move', function (opt) {
+  if (!brushMode || !brushPainting || isPanning) return;
+  const ptr = canvas.getPointer(opt.e);
+  const sp  = sceneToSubjectPx(brushTarget, ptr.x, ptr.y);
+  if (sp) {
+    paintDot(sp.x, sp.y);
+    addOverlayDot(ptr.x, ptr.y, brushTarget);
+    canvas.requestRenderAll();
+  }
+});
+
+// mouse:up — 修补画笔：提交笔迹到后端，替换零件
+canvas.on('mouse:up', async function (opt) {
+  if (!brushMode || !brushPainting) return;
+  brushPainting = false;
+
+  if (!brushCanvas || !brushTarget) {
+    clearBrushOverlays();
+    return;
+  }
+
+  const group  = brushTarget;
+  const partId = group.partId;
+  brushTarget  = null;
+
+  // 记录原始位置（替换后首件放回原位）
+  const origLeft = group.left;
+  const origTop  = group.top;
+
+  // 导出笔迹为 PNG data-url（白色笔迹=涂抹区）
+  const stroke_b64 = brushCanvas.toDataURL('image/png');
+  brushCanvas = null;
+  brushCtx    = null;
+
+  // 清除预览圆点
+  clearBrushOverlays();
+
+  const mode = document.getElementById('brush-mode').value;
+  setStatus('修补处理中…');
+  try {
+    const r = await api('/api/brush', { id: partId, stroke_b64, mode });
+    const { parts } = await r.json();
+
+    // 移除原件
+    const orig = objById.get(partId);
+    if (orig) canvas.remove(orig);
+    objById.delete(partId);
+    partData.delete(partId);
+    imgElById.delete(partId);
+
+    if (!parts || parts.length === 0) {
+      setStatus('修补后无剩余主体（全部擦除）');
+      canvas.requestRenderAll();
+      return;
+    }
+
+    // addPart 每个返回零件：首件放原位，后续向右各偏移 40px
+    for (let i = 0; i < parts.length; i++) {
+      const px = origLeft + i * 40;
+      const py = origTop;
+      await addPart(parts[i], px, py);
+    }
+
+    if (pageRect) canvas.sendToBack(pageRect);
+    canvas.requestRenderAll();
+    setStatus(`修补完成，产出 ${parts.length} 个零件`);
+  } catch (err) {
+    setStatus('修补失败: ' + err.message);
+  }
+});
+
 // 初始 fit-view（仅纸框）
 fitView();

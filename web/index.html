@@ -34,6 +34,12 @@
       <input type="number" id="bleed-num" min="0" step="0.1" value="1.5" style="width:52px">
       <select id="bleed-unit"><option value="mm">mm</option><option value="px">px</option></select>
     </label>
+    <button id="btn-brush">修补</button>
+    <select id="brush-mode" style="font-size:13px"><option value="add">加</option><option value="erase">擦</option></select>
+    <label style="display:flex;align-items:center;gap:4px;font-size:13px">笔刷
+      <input type="range" id="brush-size" min="4" max="120" value="24" style="width:72px">
+      <span id="brush-size-label" style="width:28px;text-align:right">24</span>px
+    </label>
     <button id="btn-cut">切割模式</button>
     <button id="btn-tidy">整理排版</button>
     <button id="btn-fit">适应视图</button>
