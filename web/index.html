@@ -41,6 +41,21 @@
       <span id="brush-size-label" style="width:28px;text-align:right">24</span>px
     </label>
     <button id="btn-cut">切割模式</button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px">排版精度
+      <select id="nest-precision" style="font-size:13px">
+        <option value="1">快</option>
+        <option value="4">标准</option>
+        <option value="8" selected>精细</option>
+        <option value="24">极致</option>
+      </select>
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px">间距
+      <input type="number" id="nest-spacing" min="0" step="0.5" value="2" style="width:48px">
+      <select id="nest-spacing-unit" style="font-size:13px"><option value="mm">mm</option><option value="px">px</option></select>
+    </label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:13px">
+      <input type="checkbox" id="nest-uniform">统一缩放
+    </label>
     <button id="btn-tidy">整理排版</button>
     <button id="btn-fit">适应视图</button>
     <button id="btn-delete">删除选中</button>

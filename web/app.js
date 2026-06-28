@@ -768,21 +768,43 @@ document.getElementById('btn-delete').onclick = () => {
   }
 };
 
-// —— 整理排版 -> /api/nest（位置回填，物理坐标）——
+// —— 整理排版 -> /api/nest（旋转感知 BLF，中心+角度，间距，统一缩放）——
 document.getElementById('btn-tidy').onclick = async () => {
-  const items = [...objById.values()].map(o => ({ id: o.partId, scale: o.scaleX || 1 }));
+  // 构建 items：包含 id、当前 scale、角度、锁角状态
+  const items = [...objById.values()].map(o => ({
+    id:     o.partId,
+    scale:  o.scaleX || 1,
+    angle:  o.angle  || 0,
+    locked: !!o.locked,
+  }));
   if (!items.length) return;
-  setStatus('排版中…'); showProgress(0.5);
+
+  // 读取排版控件参数
+  const angle_steps = parseInt(document.getElementById('nest-precision').value, 10);
+  const spacingRaw  = parseFloat(document.getElementById('nest-spacing').value) || 0;
+  const spacingUnit = document.getElementById('nest-spacing-unit').value;
+  // 间距统一转换为 mm（后端接收 spacing_mm）
+  const spacing_mm  = spacingUnit === 'px' ? spacingRaw / PIXEL_RATIO : spacingRaw;
+  const uniform_scale = document.getElementById('nest-uniform').checked;
+
+  setStatus('排版中…');
+  showProgress(0.4);
   try {
-    const r = await api('/api/nest', { items });
+    const r = await api('/api/nest', { items, spacing_mm, angle_steps, uniform_scale });
     const { positions } = await r.json();
     for (const pos of positions) {
       const o = objById.get(pos.id);
-      if (!o || pos.x < 0) continue;
-      // 后端返回的已是物理坐标，直接赋值
-      o.set({ left: pos.x, top: pos.y }); o.setCoords();
+      // cx<0 表示该零件未能放置，跳过保留原位
+      if (!o || pos.cx < 0) continue;
+      // 应用后端返回的缩放和角度（统一缩放时 scale 可能变化）
+      o.set({ scaleX: pos.scale, scaleY: pos.scale, angle: pos.angle });
+      // 按视觉中心物理坐标定位（与导出契约一致）
+      o.setPositionByOrigin(new fabric.Point(pos.cx, pos.cy), 'center', 'center');
+      o.setCoords();
+      // 自由件被排版赋了角度后保持 locked=false（蓝框）；锁角件不改变状态
     }
-    canvas.requestRenderAll(); setStatus('排版完成');
+    canvas.requestRenderAll();
+    setStatus('排版完成');
     pushSnapshot();
   } catch (err) { setStatus('排版失败: ' + err.message); }
   finally { hideProgress(); }
