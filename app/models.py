@@ -16,6 +16,8 @@ class Part:
     y: int = 0
     scale: float = 1.0
     rotation: float = 0.0
+    cx: "float | None" = None
+    cy: "float | None" = None
 
     @property
     def w(self) -> int:

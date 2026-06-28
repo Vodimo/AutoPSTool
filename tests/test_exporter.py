@@ -81,3 +81,45 @@ def test_render_custom_page_size():
     img_default = exporter.render_png([p])
     assert img_default.size == (g.A4_WIDTH_PX, g.A4_HEIGHT_PX), \
         f"期望 A4 ({g.A4_WIDTH_PX},{g.A4_HEIGHT_PX})，实际 {img_default.size}"
+
+
+def _ellipse_part():
+    """构建明显非方形的参数化零件（宽扁椭圆：240px 宽 × 100px 高）。"""
+    img = np.full((300, 300, 3), 255, np.uint8)
+    cv2.ellipse(img, (150, 150), (120, 50), 0, 0, 360, (0, 140, 200), -1)
+    mask = np.zeros((300, 300), np.uint8)
+    cv2.ellipse(mask, (150, 150), (120, 50), 0, 0, 360, 255, -1)
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="ellipse")
+    return part
+
+
+def _magenta_bbox(arr_rgb):
+    """返回洋红像素的宽高 (w, h)；若无洋红像素则返回 (0, 0)。"""
+    magenta = (arr_rgb[:, :, 0] > 200) & (arr_rgb[:, :, 1] < 60) & (arr_rgb[:, :, 2] > 200)
+    ys, xs = np.where(magenta)
+    if len(xs) == 0:
+        return 0, 0
+    return int(xs.max() - xs.min()), int(ys.max() - ys.min())
+
+
+def test_render_rotation_swaps_bbox():
+    """旋转 90° 后洋红刀模 bbox 的宽高应互换（误差 < 20%）。"""
+    p = _ellipse_part()
+    cx, cy = 1000.0, 1000.0
+
+    # rotation=0 → 量宽高 (w0, h0)
+    p.cx, p.cy = cx, cy
+    p.rotation = 0.0
+    arr0 = np.array(exporter.render_png([p]).convert("RGB"))
+    w0, h0 = _magenta_bbox(arr0)
+    assert w0 > 0 and h0 > 0, "rotation=0 时应有洋红像素"
+
+    # rotation=90 → 量宽高 (w1, h1)，预期 w1≈h0，h1≈w0
+    p.rotation = 90.0
+    arr1 = np.array(exporter.render_png([p]).convert("RGB"))
+    w1, h1 = _magenta_bbox(arr1)
+    assert w1 > 0 and h1 > 0, "rotation=90 时应有洋红像素"
+
+    # 旋转 90° 后宽高近似互换（20% 容差）
+    assert abs(w1 - h0) < 0.2 * h0, f"旋转后宽({w1})应≈原高({h0})"
+    assert abs(h1 - w0) < 0.2 * w0, f"旋转后高({h1})应≈原宽({w0})"

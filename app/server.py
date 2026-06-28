@@ -152,7 +152,20 @@ def api_export():
         p = PARTS.get(it["id"])
         if p is None:
             continue
-        p.x, p.y, p.scale = int(it["x"]), int(it["y"]), it.get("scale", 1.0)
+        p.scale = it.get("scale", 1.0)
+        p.rotation = it.get("angle", 0.0)
+        if "cx" in it:
+            # 新契约：cx/cy 为视觉中心（物理 px）
+            p.cx = float(it["cx"])
+            p.cy = float(it["cy"])
+            p.x = int(it.get("x", 0))
+            p.y = int(it.get("y", 0))
+        else:
+            # 旧契约：x/y 为左上角，cx/cy 留 None（exporter 内部回退）
+            p.x = int(it["x"])
+            p.y = int(it["y"])
+            p.cx = None
+            p.cy = None
         parts.append(p)
     img = exporter.render_png(parts, offset_mm=OFFSET_MM,
                                page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)))
