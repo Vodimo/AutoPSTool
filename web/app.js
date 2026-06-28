@@ -23,7 +23,6 @@ const canvas = new fabric.Canvas('c', {
 const statusEl = document.getElementById('status');
 const setStatus = (t) => statusEl.textContent = t;
 
-let cutMode = false;
 let borderPx = 20;                       // 当前白边(px，物理像素)，默认 2mm
 const objById = new Map();
 const partData = new Map();              // id -> 后端返回的零件数据
@@ -577,8 +576,298 @@ document.getElementById('btn-tidy').onclick = async () => {
 // —— 适应视图按钮 ——
 document.getElementById('btn-fit').onclick = fitView;
 
-// —— 切割按钮：本阶段保持占位 ——
-document.getElementById('btn-cut').onclick = () => setStatus('切割将在后续版本重做');
+// ============================================================
+// 切割模式（Phase 5 Task 2）
+// ============================================================
+
+// 出血控件：mm/px 互换，调用后端 /api/set_bleed
+const bleedNum  = document.getElementById('bleed-num');
+const bleedUnit = document.getElementById('bleed-unit');
+
+function getBleedMm() {
+  const v = parseFloat(bleedNum.value) || 0;
+  return bleedUnit.value === 'px' ? v / PIXEL_RATIO : v;
+}
+function onBleedChange() {
+  const mm = getBleedMm();
+  api('/api/set_bleed', { bleed_mm: mm }).catch(() => {});
+}
+bleedNum.onchange  = onBleedChange;
+bleedUnit.onchange = onBleedChange;
+
+// 切割状态变量
+let cutMode = false;            // 是否处于切割模式
+let cutDragging = false;        // 当前是否在拖线中
+let cutDragTarget = null;       // 拖线命中的 group 对象
+let cutLine = null;             // 预览线(fabric.Line)
+let cutStart = null;            // 拖线起点（画布物理坐标）
+
+// cutPreview: 当前未确认的切割预览状态
+// { origId, pieceIds, x1, y1, x2, y2 }
+let cutPreview = null;
+
+// 切割模式：进入/退出
+function enterCutMode() {
+  cutMode = true;
+  document.getElementById('btn-cut').classList.add('active');
+  // 禁止所有零件拖拽，但保留可选
+  canvas.getObjects().forEach(o => {
+    if (o.partId) {
+      o.lockMovementX = true;
+      o.lockMovementY = true;
+    }
+  });
+  setStatus('切割：选中一个零件，在其上拖一条直线');
+}
+
+function exitCutMode() {
+  cutMode = false;
+  document.getElementById('btn-cut').classList.remove('active');
+  cancelCutPreview();
+  // 恢复所有零件可拖拽
+  canvas.getObjects().forEach(o => {
+    if (o.partId) {
+      o.lockMovementX = false;
+      o.lockMovementY = false;
+    }
+  });
+  // 清除拖线
+  if (cutLine) { canvas.remove(cutLine); cutLine = null; }
+  cutDragging = false;
+  cutDragTarget = null;
+  cutStart = null;
+  canvas.requestRenderAll();
+  setStatus('已退出切割模式');
+}
+
+// 取消预览：移除预览件，恢复原件显示
+function cancelCutPreview() {
+  if (!cutPreview) return;
+  // 移除预览件
+  for (const pid of cutPreview.pieceIds) {
+    const o = objById.get(pid);
+    if (o) canvas.remove(o);
+    objById.delete(pid);
+    partData.delete(pid);
+    imgElById.delete(pid);
+  }
+  // 恢复原件显示
+  const orig = objById.get(cutPreview.origId);
+  if (orig) { orig.visible = true; }
+  cutPreview = null;
+  canvas.requestRenderAll();
+}
+
+// 按钮切换切割模式
+document.getElementById('btn-cut').onclick = () => {
+  if (cutMode) exitCutMode();
+  else enterCutMode();
+};
+
+// C 键切换切割模式（忽略在输入框中按键的情况）
+window.addEventListener('keydown', (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (e.key === 'c' || e.key === 'C') {
+    if (cutMode) exitCutMode();
+    else enterCutMode();
+  }
+});
+
+// Enter 确认切割，Esc 取消预览
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && cutPreview) {
+    confirmCut();
+    return;
+  }
+  if (e.key === 'Escape') {
+    if (cutPreview) {
+      cancelCutPreview();
+      setStatus('已取消切割');
+    } else if (cutMode) {
+      exitCutMode();
+    }
+  }
+});
+
+// 拖线：mouse:down（只在 cutMode 且非平移时）
+canvas.on('mouse:down', function (opt) {
+  if (!cutMode || isPanning) return;
+  if (cutPreview) return;  // 有未确认预览时不启动新拖线
+
+  // 确定命中的零件 group
+  const target = opt.target;
+  if (!target || !target.partId) return;
+
+  // 检查是否旋转 / 锁角
+  if (target.locked || Math.abs(target.angle || 0) > 0.5) {
+    setStatus('请先按 L 解除该零件的锁角再切割');
+    return;
+  }
+
+  // 启动拖线
+  cutDragging = true;
+  cutDragTarget = target;
+  const ptr = canvas.getPointer(opt.e);
+  cutStart = { x: ptr.x, y: ptr.y };
+
+  // 创建预览线（洋红虚线）
+  cutLine = new fabric.Line(
+    [cutStart.x, cutStart.y, cutStart.x, cutStart.y],
+    {
+      stroke: '#FF00FF',
+      strokeWidth: 2,
+      strokeDashArray: [6, 6],
+      selectable: false,
+      evented: false,
+      excludeFromExport: true,
+    }
+  );
+  canvas.add(cutLine);
+  canvas.requestRenderAll();
+});
+
+// 拖线：mouse:move
+canvas.on('mouse:move', function (opt) {
+  if (!cutMode || !cutDragging || !cutLine || isPanning) return;
+  const ptr = canvas.getPointer(opt.e);
+  cutLine.set({ x2: ptr.x, y2: ptr.y });
+  canvas.requestRenderAll();
+});
+
+// 拖线：mouse:up → 发起预览请求
+canvas.on('mouse:up', async function (opt) {
+  if (!cutMode || !cutDragging) return;
+  cutDragging = false;
+
+  if (!cutLine || !cutDragTarget || !cutStart) {
+    if (cutLine) { canvas.remove(cutLine); cutLine = null; }
+    return;
+  }
+
+  const ptr = canvas.getPointer(opt.e);
+  const sceneEnd = { x: ptr.x, y: ptr.y };
+
+  // 移除预览线
+  canvas.remove(cutLine);
+  cutLine = null;
+
+  // 端点距离太短则放弃
+  const dx = sceneEnd.x - cutStart.x;
+  const dy = sceneEnd.y - cutStart.y;
+  if (Math.sqrt(dx * dx + dy * dy) < 5) {
+    cutDragTarget = null;
+    cutStart = null;
+    canvas.requestRenderAll();
+    setStatus('切割线太短，请重试');
+    return;
+  }
+
+  const group = cutDragTarget;
+  cutDragTarget = null;
+
+  // 画布坐标 → 零件局部物理坐标
+  // group.left/top 为物理坐标原点（刀模 bbox 左上），group 无旋转，scaleX=1
+  const scaleX = group.scaleX || 1;
+  const scaleY = group.scaleY || 1;
+  const x1 = (cutStart.x   - group.left) / scaleX;
+  const y1 = (cutStart.y   - group.top)  / scaleY;
+  const x2 = (sceneEnd.x   - group.left) / scaleX;
+  const y2 = (sceneEnd.y   - group.top)  / scaleY;
+
+  const partId = group.partId;
+  cutStart = null;
+
+  setStatus('计算切割预览…');
+  try {
+    const r = await api('/api/cut', { id: partId, x1, y1, x2, y2, commit: false });
+    const { parts: pieces } = await r.json();
+    if (!pieces || pieces.length === 0) {
+      setStatus('切割未产生有效分块，请调整切割线');
+      return;
+    }
+
+    // 隐藏原件
+    group.visible = false;
+    canvas.requestRenderAll();
+
+    // 计算两块的错开位置（一左一右各偏移半个白边+10px）
+    const spread = borderPx + 10;
+    const offsetsX = [-spread, spread];
+    const pieceIds = [];
+
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = pieces[i];
+      const ox = group.left + (offsetsX[i] || 0);
+      const oy = group.top;
+      await addPart(piece, ox, oy);
+      // 切割预览件锁拖拽
+      const po = objById.get(piece.id);
+      if (po) { po.lockMovementX = true; po.lockMovementY = true; }
+      pieceIds.push(piece.id);
+    }
+
+    cutPreview = { origId: partId, pieceIds, x1, y1, x2, y2 };
+    setStatus('Enter 确认 / Esc 取消');
+  } catch (err) {
+    // 恢复原件可见
+    group.visible = true;
+    canvas.requestRenderAll();
+    setStatus('切割预览失败: ' + err.message);
+  }
+});
+
+// 确认切割
+async function confirmCut() {
+  if (!cutPreview) return;
+  const { origId, pieceIds, x1, y1, x2, y2 } = cutPreview;
+
+  // 记录两块在画布上的当前位置（供重新 addPart 时复用）
+  const previewPositions = pieceIds.map(pid => {
+    const o = objById.get(pid);
+    return o ? { left: o.left, top: o.top } : { left: 0, top: 0 };
+  });
+
+  // 移除预览件（稍后用 commit 返回件替换）
+  for (const pid of pieceIds) {
+    const o = objById.get(pid);
+    if (o) canvas.remove(o);
+    objById.delete(pid);
+    partData.delete(pid);
+    imgElById.delete(pid);
+  }
+
+  setStatus('提交切割…');
+  try {
+    const r = await api('/api/cut', { id: origId, x1, y1, x2, y2, commit: true });
+    const { parts: pieces } = await r.json();
+
+    // 移除原件
+    const orig = objById.get(origId);
+    if (orig) canvas.remove(orig);
+    objById.delete(origId);
+    partData.delete(origId);
+    imgElById.delete(origId);
+
+    cutPreview = null;
+
+    // 加入真正的两块零件
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = pieces[i];
+      const pos = previewPositions[i] || { left: 0, top: 0 };
+      await addPart(piece, pos.left, pos.top);
+    }
+
+    canvas.requestRenderAll();
+    setStatus('切割完成');
+  } catch (err) {
+    // 恢复原件
+    const orig = objById.get(origId);
+    if (orig) { orig.visible = true; canvas.requestRenderAll(); }
+    cutPreview = null;
+    setStatus('切割提交失败: ' + err.message);
+  }
+}
 
 // 初始 fit-view（仅纸框）
 fitView();
