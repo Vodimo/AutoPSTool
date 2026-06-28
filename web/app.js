@@ -286,13 +286,28 @@ async function addPart(p, x, y) {
   canvas.requestRenderAll();
 }
 
-// —— 重建某零件 Group（同步：白边变化时重算多边形，保留位置/缩放/角度）——
+// —— 锁角视觉标记：锁角 = 洋红选中框/手柄，自由 = 默认蓝 ——
+function markLocked(o) {
+  o.locked = true;
+  o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+  canvas.requestRenderAll();
+}
+function markFree(o) {
+  o.locked = false;
+  o.set({ angle: 0, borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
+  o.setCoords();
+}
+
+// —— 重建某零件 Group（同步：白边变化时重算多边形，保留位置/缩放/角度/锁角）——
 function rebuildPart(id) {
   const old = objById.get(id);
   if (!old) return;
   const grp = buildGroupSync(partData.get(id));
   if (!grp) return;
   grp.set({ left: old.left, top: old.top, scaleX: old.scaleX, scaleY: old.scaleY, angle: old.angle });
+  // 保留锁角状态：如已锁角则继承洋红标记
+  grp.locked = old.locked;
+  if (grp.locked) markLocked(grp);
   canvas.remove(old);
   objById.set(id, grp);
   canvas.add(grp);
@@ -441,6 +456,35 @@ pageHInput.onchange = applyPageFromInputs;
 pageWInput.disabled = true;
 pageHInput.disabled = true;
 
+// —— 旋转事件：手动旋转即自动锁角 ——
+canvas.on('object:rotating', (e) => {
+  const o = e.target;
+  if (o && o.partId) {
+    markLocked(o);
+    setStatus('已锁角（按 L 解锁归零）');
+  }
+});
+// object:modified 兜底：修改后 angle 非 0 则锁定
+canvas.on('object:modified', (e) => {
+  const o = e.target;
+  if (o && o.partId && o.angle !== 0 && !o.locked) {
+    markLocked(o);
+    setStatus('已锁角（按 L 解锁归零）');
+  }
+});
+
+// —— L 键解锁：选中锁角零件 → angle 归 0，恢复蓝色框 ——
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'l' || e.key === 'L') {
+    const o = canvas.getActiveObject();
+    if (o && o.partId && o.locked) {
+      markFree(o);
+      canvas.requestRenderAll();
+      setStatus('已解除锁角');
+    }
+  }
+});
+
 // —— 导出 PNG -> /api/export（含框外过滤）——
 document.getElementById('btn-export').onclick = async () => {
   // 计算所有零件中哪些完全在纸框内（物理坐标比较）
@@ -474,12 +518,17 @@ document.getElementById('btn-export').onclick = async () => {
 
   if (!insideParts.length) { setStatus('所有零件均在纸框外，无法导出'); return; }
 
-  const items = insideParts.map(o => ({
-    id: o.partId,
-    x: Math.round(o.left),
-    y: Math.round(o.top),
-    scale: o.scaleX || 1,
-  }));
+  // 导出发送中心坐标 + 角度（后端据此正确渲染旋转）
+  const items = insideParts.map(o => {
+    const c = o.getCenterPoint();
+    return {
+      id: o.partId,
+      cx: Math.round(c.x),
+      cy: Math.round(c.y),
+      angle: o.angle || 0,
+      scale: o.scaleX || 1,
+    };
+  });
 
   setStatus('导出中…'); showProgress(0.5);
   try {
