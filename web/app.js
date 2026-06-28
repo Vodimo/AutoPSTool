@@ -25,8 +25,8 @@ const setStatus = (t) => statusEl.textContent = t;
 
 let borderPx = 20;                       // 当前白边(px，物理像素)，默认 2mm
 const objById = new Map();
-const partData = new Map();              // id -> 后端返回的零件数据
-const imgElById = new Map();             // id -> 已加载的 HTMLImageElement（只加载一次）
+const partData = new Map();              // id -> 后端返回的零件数据（只增不删，供 undo 重建）
+const imgElById = new Map();             // id -> 已加载的 HTMLImageElement（只增不删，供 undo 重建）
 
 // 纸框 Rect（始终置于最底层）
 let pageRect = null;
@@ -290,11 +290,13 @@ function markLocked(o) {
   o.locked = true;
   o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
   canvas.requestRenderAll();
+  pushSnapshot();
 }
 function markFree(o) {
   o.locked = false;
   o.set({ angle: 0, borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
   o.setCoords();
+  pushSnapshot();
 }
 
 // —— 重建某零件 Group（同步：白边变化时重算多边形，保留位置/缩放/角度/锁角）——
@@ -306,7 +308,10 @@ function rebuildPart(id) {
   grp.set({ left: old.left, top: old.top, scaleX: old.scaleX, scaleY: old.scaleY, angle: old.angle });
   // 保留锁角状态：如已锁角则继承洋红标记
   grp.locked = old.locked;
-  if (grp.locked) markLocked(grp);
+  if (grp.locked) {
+    // 内联设置锁角标记，不触发 pushSnapshot（rebuildPart 由 commitBorder 调用）
+    grp.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+  }
   canvas.remove(old);
   objById.set(id, grp);
   canvas.add(grp);
@@ -314,20 +319,215 @@ function rebuildPart(id) {
   if (pageRect) canvas.sendToBack(pageRect);
 }
 
-// 导入图片 -> /api/segment
+// ============================================================
+// 撤销/重做 快照栈
+// ============================================================
+
+const undoStack = [];   // 历史快照（栈顶为最近已提交状态）
+const redoStack = [];   // redo 暂存
+const UNDO_MAX  = 50;   // 最大栈深
+
+// 生成当前场景快照
+function snapshot() {
+  const activeIds = [...objById.keys()];
+  const tf = {};
+  for (const [id, g] of objById.entries()) {
+    tf[id] = {
+      left:   g.left,
+      top:    g.top,
+      scaleX: g.scaleX,
+      angle:  g.angle || 0,
+      locked: !!g.locked,
+    };
+  }
+  return {
+    activeIds,
+    tf,
+    g: {
+      borderPx,
+      pageWmm: pageWpx / PIXEL_RATIO,
+      pageHmm: pageHpx / PIXEL_RATIO,
+      bleedMm: getBleedMm(),
+    },
+  };
+}
+
+// 推入快照（每次操作完成后调用）
+function pushSnapshot() {
+  undoStack.push(snapshot());
+  if (undoStack.length > UNDO_MAX) undoStack.shift();
+  redoStack.length = 0;   // 新操作后清空 redo 栈
+}
+
+// 应用快照：重建场景至 s 描述的状态
+async function applySnapshot(s) {
+  // 1. 全局参数
+  borderPx = s.g.borderPx;
+  // 纸张尺寸（如有变化）
+  if (pageWpx / PIXEL_RATIO !== s.g.pageWmm || pageHpx / PIXEL_RATIO !== s.g.pageHmm) {
+    applyPageSize(s.g.pageWmm, s.g.pageHmm);
+  }
+  // 出血
+  const curBleed = getBleedMm();
+  if (Math.abs(curBleed - s.g.bleedMm) > 0.001) {
+    // 更新 UI 输入框（按当前单位）
+    if (bleedUnit.value === 'px') {
+      bleedNum.value = (s.g.bleedMm * PIXEL_RATIO).toFixed(0);
+    } else {
+      bleedNum.value = s.g.bleedMm.toFixed(2);
+    }
+    api('/api/set_bleed', { bleed_mm: s.g.bleedMm }).catch(() => {});
+  }
+  // 白边同步到 UI（range 值 = mm*PIXEL_RATIO，num 按当前单位）
+  const borderMm = borderPx / PIXEL_RATIO;
+  const rng  = document.getElementById('border-range');
+  const num  = document.getElementById('border-num');
+  const unit = document.getElementById('border-unit');
+  rng.value = Math.min(100, Math.round(borderMm * PIXEL_RATIO));
+  num.value = unit.value === 'px' ? (borderMm * PIXEL_RATIO).toFixed(0) : borderMm.toFixed(1);
+  api('/api/set_border', { offset_mm: borderMm }).catch(() => {});
+
+  // 2. 活动集：移除不在快照 activeIds 中的 group
+  const activeSet = new Set(s.activeIds);
+  for (const [id, g] of [...objById.entries()]) {
+    if (!activeSet.has(id)) {
+      canvas.remove(g);
+      objById.delete(id);
+    }
+  }
+
+  // 添加快照中有、但当前没有的 group（从保留数据重建）
+  for (const id of s.activeIds) {
+    if (!objById.has(id)) {
+      const pd = partData.get(id);
+      if (!pd) continue;   // 理论上不会发生：partData 只增不删
+      const grp = buildGroupSync(pd);
+      if (!grp) continue;
+      objById.set(id, grp);
+      canvas.add(grp);
+    }
+  }
+
+  // 3. 应用每个零件 transform
+  for (const id of s.activeIds) {
+    const g  = objById.get(id);
+    const tf = s.tf[id];
+    if (!g || !tf) continue;
+    g.set({
+      left:   tf.left,
+      top:    tf.top,
+      scaleX: tf.scaleX,
+      scaleY: tf.scaleX,   // 等比缩放
+      angle:  tf.angle,
+    });
+    g.setCoords();
+    // 锁角标记（内联设置，不触发 pushSnapshot）
+    if (tf.locked) {
+      g.locked = true;
+      g.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+    } else {
+      g.locked = false;
+      g.set({ borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
+    }
+  }
+
+  // 4. 白边变化时重建参数化零件多边形
+  for (const id of s.activeIds) {
+    const pd = partData.get(id);
+    if (pd && pd.kind === 'parametric') rebuildPartInPlace(id, s.tf[id]);
+  }
+
+  // 确保纸框在最底层
+  if (pageRect) canvas.sendToBack(pageRect);
+  canvas.requestRenderAll();
+}
+
+// 重建参数化零件多边形并应用 transform（供 applySnapshot 内部使用，不触发快照）
+function rebuildPartInPlace(id, tf) {
+  const pd  = partData.get(id);
+  const old = objById.get(id);
+  if (!pd || !old) return;
+  const grp = buildGroupSync(pd);
+  if (!grp) return;
+  if (tf) {
+    grp.set({
+      left: tf.left, top: tf.top,
+      scaleX: tf.scaleX, scaleY: tf.scaleX,
+      angle: tf.angle,
+    });
+    grp.setCoords();
+    if (tf.locked) {
+      grp.locked = true;
+      grp.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+    } else {
+      grp.locked = false;
+      grp.set({ borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
+    }
+  }
+  canvas.remove(old);
+  objById.set(id, grp);
+  canvas.add(grp);
+  if (pageRect) canvas.sendToBack(pageRect);
+}
+
+// 撤销
+async function undo() {
+  if (undoStack.length < 2) return;   // 保留基线快照
+  redoStack.push(undoStack[undoStack.length - 1]);
+  undoStack.pop();
+  await applySnapshot(undoStack[undoStack.length - 1]);
+  setStatus('已撤销');
+}
+
+// 重做
+async function redo() {
+  if (!redoStack.length) return;
+  const s = redoStack.pop();
+  undoStack.push(s);
+  await applySnapshot(s);
+  setStatus('已重做');
+}
+
+// 快捷键 Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
+window.addEventListener('keydown', (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (!ctrl) return;
+  if (e.key === 'z' || e.key === 'Z') {
+    if (e.shiftKey) {
+      e.preventDefault(); redo();
+    } else {
+      e.preventDefault(); undo();
+    }
+    return;
+  }
+  if (e.key === 'y' || e.key === 'Y') {
+    e.preventDefault(); redo();
+  }
+});
+
+// 导入图片 -> /api/segment（支持多文件）
 document.getElementById('btn-import').onclick = () => document.getElementById('file').click();
 document.getElementById('file').onchange = async (e) => {
-  const f = e.target.files[0]; if (!f) return;
-  setStatus('抠图中…'); showProgress(0.3);
-  const reader = new FileReader();
-  reader.onload = async () => {
-    try {
-      const r = await api('/api/segment', { image_base64: reader.result });
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  setStatus('抠图中…');
+  const total = files.length;
+  try {
+    for (let fileIdx = 0; fileIdx < total; fileIdx++) {
+      const f = files[fileIdx];
+      showProgress(fileIdx / total);
+      const dataUrl = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(f);
+      });
+      const r = await api('/api/segment', { image_base64: dataUrl });
       const { parts } = await r.json();
-      showProgress(0.7);
+      showProgress((fileIdx + 0.7) / total);
       let i = 0;
       for (const p of parts) {
-        // 新零件初始散落在纸框内/附近(物理坐标)，便于直接落在可印刷区；之后可「整理排版」
         const col = (importCounter + i) % 5;
         const row = Math.floor((importCounter + i) / 5);
         const x = 20 + col * 320;
@@ -336,13 +536,17 @@ document.getElementById('file').onchange = async (e) => {
         i++;
       }
       importCounter += parts.length;
-      setStatus(`分离出 ${parts.length} 个零件`);
-      // 导入后适应视图使新零件可见
-      fitView();
-    } catch (err) { setStatus('抠图失败: ' + err.message); }
-    finally { hideProgress(); }
-  };
-  reader.readAsDataURL(f);
+      setStatus(`已导入 ${fileIdx + 1}/${total} 张，分离出 ${parts.length} 个零件`);
+      showProgress((fileIdx + 1) / total);
+    }
+    setStatus(`全部导入完成（共 ${total} 张）`);
+    fitView();
+    pushSnapshot();
+  } catch (err) {
+    setStatus('抠图失败: ' + err.message);
+  } finally {
+    hideProgress();
+  }
   e.target.value = '';
 };
 
@@ -368,10 +572,11 @@ rng.oninput = () => {
 };
 num.oninput  = syncFromControls;
 unit.onchange = syncFromControls;
-// 松手把最终值同步给后端（导出用）
+// 松手把最终值同步给后端（导出用），并推快照
 function commitBorder() {
   const mm = parseFloat(rng.value) / PIXEL_RATIO;
   api('/api/set_border', { offset_mm: mm }).catch(() => {});
+  pushSnapshot();
 }
 rng.onchange  = commitBorder;
 num.onchange  = commitBorder;
@@ -395,7 +600,7 @@ function applyPageSize(wMm, hMm) {
   api('/api/set_page', { w_mm: wMm, h_mm: hMm }).catch(() => {});
 }
 
-// 从输入框读取当前值并应用
+// 从输入框读取当前值并应用，并推快照
 function applyPageFromInputs() {
   let w = parseFloat(pageWInput.value) || 210;
   let h = parseFloat(pageHInput.value) || 297;
@@ -404,6 +609,7 @@ function applyPageFromInputs() {
     h = h / PIXEL_RATIO;
   }
   applyPageSize(w, h);
+  pushSnapshot();
 }
 
 // 预设下拉切换
@@ -430,6 +636,7 @@ pagePreset.onchange = () => {
   pageWInput.disabled = true;
   pageHInput.disabled = true;
   applyPageSize(preset.w, preset.h);
+  pushSnapshot();
 };
 
 // 单位切换：换算输入框数值
@@ -459,16 +666,22 @@ pageHInput.disabled = true;
 canvas.on('object:rotating', (e) => {
   const o = e.target;
   if (o && o.partId) {
-    markLocked(o);
+    // 内联标记（不触发 pushSnapshot，由 object:modified 统一推）
+    o.locked = true;
+    o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
     setStatus('已锁角（按 L 解锁归零）');
   }
 });
-// object:modified 兜底：修改后 angle 非 0 则锁定
+// object:modified 兜底：修改后 angle 非 0 则锁定；所有移动/缩放/旋转完成时推快照
 canvas.on('object:modified', (e) => {
   const o = e.target;
-  if (o && o.partId && o.angle !== 0 && !o.locked) {
-    markLocked(o);
-    setStatus('已锁角（按 L 解锁归零）');
+  if (o && o.partId) {
+    if (o.angle !== 0 && !o.locked) {
+      o.locked = true;
+      o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+      setStatus('已锁角（按 L 解锁归零）');
+    }
+    pushSnapshot();
   }
 });
 
@@ -480,6 +693,7 @@ window.addEventListener('keydown', (e) => {
       markFree(o);
       canvas.requestRenderAll();
       setStatus('已解除锁角');
+      // markFree 内部已调用 pushSnapshot
     }
   }
 });
@@ -541,16 +755,16 @@ document.getElementById('btn-export').onclick = async () => {
   finally { hideProgress(); }
 };
 
-// —— 删除选中 ——
+// —— 删除选中（只移出画布和 objById，保留 partData/imgElById 供 undo 重建）——
 document.getElementById('btn-delete').onclick = () => {
   const t = canvas.getActiveObject();
   if (t && t.partId) {
-    objById.delete(t.partId);
-    partData.delete(t.partId);
-    imgElById.delete(t.partId);
     canvas.remove(t);
     canvas.discardActiveObject();
+    objById.delete(t.partId);
+    // partData/imgElById 保留，不删
     canvas.requestRenderAll();
+    pushSnapshot();
   }
 };
 
@@ -569,6 +783,7 @@ document.getElementById('btn-tidy').onclick = async () => {
       o.set({ left: pos.x, top: pos.y }); o.setCoords();
     }
     canvas.requestRenderAll(); setStatus('排版完成');
+    pushSnapshot();
   } catch (err) { setStatus('排版失败: ' + err.message); }
   finally { hideProgress(); }
 };
@@ -591,6 +806,7 @@ function getBleedMm() {
 function onBleedChange() {
   const mm = getBleedMm();
   api('/api/set_bleed', { bleed_mm: mm }).catch(() => {});
+  pushSnapshot();
 }
 bleedNum.onchange  = onBleedChange;
 bleedUnit.onchange = onBleedChange;
@@ -640,16 +856,15 @@ function exitCutMode() {
   setStatus('已退出切割模式');
 }
 
-// 取消预览：移除预览件，恢复原件显示
+// 取消预览：移除预览件，恢复原件显示（预览件只从 objById 移除，partData/imgElById 保留）
 function cancelCutPreview() {
   if (!cutPreview) return;
-  // 移除预览件
+  // 移除预览件（只从画布和 objById 移除，保留 partData/imgElById）
   for (const pid of cutPreview.pieceIds) {
     const o = objById.get(pid);
     if (o) canvas.remove(o);
     objById.delete(pid);
-    partData.delete(pid);
-    imgElById.delete(pid);
+    // partData/imgElById 保留
   }
   // 恢复原件显示
   const orig = objById.get(cutPreview.origId);
@@ -767,7 +982,6 @@ canvas.on('mouse:up', async function (opt) {
   cutDragTarget = null;
 
   // 画布坐标 → 零件局部物理坐标
-  // group.left/top 为物理坐标原点（刀模 bbox 左上），group 无旋转，scaleX=1
   const scaleX = group.scaleX || 1;
   const scaleY = group.scaleY || 1;
   const x1 = (cutStart.x   - group.left) / scaleX;
@@ -779,6 +993,7 @@ canvas.on('mouse:up', async function (opt) {
   cutStart = null;
 
   setStatus('计算切割预览…');
+  showProgress(0.5);
   try {
     const r = await api('/api/cut', { id: partId, x1, y1, x2, y2, commit: false });
     const { parts: pieces } = await r.json();
@@ -814,6 +1029,8 @@ canvas.on('mouse:up', async function (opt) {
     group.visible = true;
     canvas.requestRenderAll();
     setStatus('切割预览失败: ' + err.message);
+  } finally {
+    hideProgress();
   }
 });
 
@@ -828,26 +1045,25 @@ async function confirmCut() {
     return o ? { left: o.left, top: o.top } : { left: 0, top: 0 };
   });
 
-  // 移除预览件（稍后用 commit 返回件替换）
+  // 移除预览件（只从画布和 objById 移除，保留 partData/imgElById）
   for (const pid of pieceIds) {
     const o = objById.get(pid);
     if (o) canvas.remove(o);
     objById.delete(pid);
-    partData.delete(pid);
-    imgElById.delete(pid);
+    // partData/imgElById 保留
   }
 
   setStatus('提交切割…');
+  showProgress(0.5);
   try {
     const r = await api('/api/cut', { id: origId, x1, y1, x2, y2, commit: true });
     const { parts: pieces } = await r.json();
 
-    // 移除原件
+    // 移除原件（只从画布和 objById 移除，保留 partData/imgElById）
     const orig = objById.get(origId);
     if (orig) canvas.remove(orig);
     objById.delete(origId);
-    partData.delete(origId);
-    imgElById.delete(origId);
+    // partData/imgElById 保留
 
     cutPreview = null;
 
@@ -860,12 +1076,15 @@ async function confirmCut() {
 
     canvas.requestRenderAll();
     setStatus('切割完成');
+    pushSnapshot();
   } catch (err) {
     // 恢复原件
     const orig = objById.get(origId);
     if (orig) { orig.visible = true; canvas.requestRenderAll(); }
     cutPreview = null;
     setStatus('切割提交失败: ' + err.message);
+  } finally {
+    hideProgress();
   }
 }
 
@@ -960,7 +1179,6 @@ function sceneToSubjectPx(group, sceneX, sceneY) {
   const imgChild = objs && objs.length >= 2 ? objs[1] : null;
   if (!imgChild) return null;
   // subject_image 左上角在场景（物理）坐标：
-  // group.left = die bbox minx（group 原点），img.left = -minx → subject_image 原点 = group.left + img.left * group.scaleX
   const scaleX = group.scaleX || 1;
   const scaleY = group.scaleY || 1;
   const subjOriginX = group.left + imgChild.left * scaleX;
@@ -1080,20 +1298,21 @@ canvas.on('mouse:up', async function (opt) {
 
   const mode = document.getElementById('brush-mode').value;
   setStatus('修补处理中…');
+  showProgress(0.5);
   try {
     const r = await api('/api/brush', { id: partId, stroke_b64, mode });
     const { parts } = await r.json();
 
-    // 移除原件
+    // 移除原件（只从画布和 objById 移除，保留 partData/imgElById）
     const orig = objById.get(partId);
     if (orig) canvas.remove(orig);
     objById.delete(partId);
-    partData.delete(partId);
-    imgElById.delete(partId);
+    // partData/imgElById 保留
 
     if (!parts || parts.length === 0) {
       setStatus('修补后无剩余主体（全部擦除）');
       canvas.requestRenderAll();
+      pushSnapshot();
       return;
     }
 
@@ -1107,10 +1326,14 @@ canvas.on('mouse:up', async function (opt) {
     if (pageRect) canvas.sendToBack(pageRect);
     canvas.requestRenderAll();
     setStatus(`修补完成，产出 ${parts.length} 个零件`);
+    pushSnapshot();
   } catch (err) {
     setStatus('修补失败: ' + err.message);
+  } finally {
+    hideProgress();
   }
 });
 
-// 初始 fit-view（仅纸框）
+// 初始 fit-view（仅纸框）并推基线快照（使最早的导入也可撤销）
 fitView();
+pushSnapshot();
