@@ -121,7 +121,6 @@ def api_cut():
                                   bleed_mm=BLEED_MM)
     pieces = [x for x in (a, b) if x is not None]
     if commit:
-        del PARTS[d["id"]]
         for piece in pieces:
             PARTS[piece.id] = piece
     return jsonify({"parts": [part_to_dict(p) for p in pieces]})
@@ -170,8 +169,7 @@ def api_brush():
 
     pieces = part_builder.apply_brush(part, stroke, mode)
 
-    # 用新零件替换旧件（全擦没时也删原件）
-    del PARTS[d["id"]]
+    # 追加新零件，保留原件（支持 undo 重建）
     for p in pieces:
         PARTS[p.id] = p
 

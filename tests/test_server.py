@@ -120,7 +120,7 @@ def test_set_bleed():
 
 
 def test_brush_endpoint():
-    """POST /api/brush：erase 笔迹→200，返回 parts，旧 id 从 PARTS 删除。"""
+    """POST /api/brush：erase 笔迹→200，返回 parts，旧 id 保留在 PARTS。"""
     part = _make_parametric_part("brushtest")
     client = server.app.test_client()
 
@@ -137,15 +137,15 @@ def test_brush_endpoint():
     data = r.get_json()
     assert "parts" in data, "响应应含 parts 字段"
     assert len(data["parts"]) >= 1, "擦小角应至少返回 1 个零件"
-    # 旧 id 应从 PARTS 删除
-    assert "brushtest" not in server.PARTS, "旧 id 应已从 PARTS 删除"
+    # 旧 id 应仍在 PARTS（支持 undo）
+    assert "brushtest" in server.PARTS, "旧 id 应保留在 PARTS（支持 undo）"
     # 新零件应已入库
     for p in data["parts"]:
         assert p["id"] in server.PARTS, f"新零件 {p['id']} 应已入库"
 
 
 def test_cut_preview_no_mutate():
-    """commit=false 仅预览不改 PARTS；commit=true 删原件加两块。"""
+    """commit=false 仅预览不改 PARTS；commit=true 保留原件并加两块。"""
     part = _make_parametric_part("cutprev")
     client = server.app.test_client()
     mid_x = part.w // 2
@@ -158,12 +158,12 @@ def test_cut_preview_no_mutate():
     assert len(data["parts"]) == 2, "预览应返回 2 块"
     assert "cutprev" in server.PARTS, "commit=false 不应删除原件"
 
-    # 提交：删原件，两块新 id 入库
+    # 提交：保留原件，两块新 id 也入库
     r2 = client.post("/api/cut", json={**payload, "commit": True})
     assert r2.status_code == 200, f"提交切割应返回 200，实际 {r2.status_code}"
     data2 = r2.get_json()
     assert len(data2["parts"]) == 2, "提交应返回 2 块"
     new_ids = [p["id"] for p in data2["parts"]]
-    assert "cutprev" not in server.PARTS, "commit=true 应删除原件"
+    assert "cutprev" in server.PARTS, "commit=true 应保留原件（支持 undo）"
     for nid in new_ids:
         assert nid in server.PARTS, f"新零件 {nid} 应已入库"
