@@ -83,6 +83,15 @@ def test_render_custom_page_size():
         f"期望 A4 ({g.A4_WIDTH_PX},{g.A4_HEIGHT_PX})，实际 {img_default.size}"
 
 
+def test_render_skips_unplaced_cx():
+    """cx<0（排版未放下）的零件不应被渲染（原实现会部分画在页角）。"""
+    p = _para_part()
+    p.cx = p.cy = -1.0
+    arr = np.array(exporter.render_png([p]).convert("RGB"))
+    magenta = (arr[:, :, 0] > 200) & (arr[:, :, 1] < 60) & (arr[:, :, 2] > 200)
+    assert magenta.sum() == 0, "未放置零件不应出现在导出图中"
+
+
 def _ellipse_part():
     """构建明显非方形的参数化零件（宽扁椭圆：240px 宽 × 100px 高）。"""
     img = np.full((300, 300, 3), 255, np.uint8)

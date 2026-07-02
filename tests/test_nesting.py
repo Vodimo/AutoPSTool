@@ -74,6 +74,17 @@ def test_nest_no_overlap_centers():
     assert not buf1.intersects(buf2), "排版后两零件间距 buffer 不应相交"
 
 
+def test_nest_anchor_is_bbox_center():
+    """无旋转排版时 (cx,cy) = 足迹包围盒中心（前端/导出均以包围盒中心为锚点）。"""
+    p = _build_circle_part("a", radius=60)
+    nesting.nest([p], angle_steps=1, page_px=(g.A4_WIDTH_PX, g.A4_HEIGHT_PX))
+    assert p.cx >= 0
+    poly = nesting.part_polygon(p)
+    minx, miny, maxx, maxy = poly.bounds
+    assert abs((minx + maxx) / 2 - p.cx) < 1e-6, "cx 应为足迹包围盒中心 x"
+    assert abs((miny + maxy) / 2 - p.cy) < 1e-6, "cy 应为足迹包围盒中心 y"
+
+
 def test_nest_rotation_helps_fit():
     """细长零件在窄页：angle_steps=1（只 0°）放不下，angle_steps=4（含 90°）可放下。"""
     # 椭圆：宽 400px，高 60px（加白边约 440×100）

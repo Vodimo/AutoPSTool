@@ -140,6 +140,9 @@ let panStart = null;
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !e.repeat) {
+    // 焦点在表单控件上时不劫持空格（否则无法在输入框输入/触发按钮）
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
     spaceDown = true;
     // 阻止空格导致页面滚动
     e.preventDefault();
@@ -202,7 +205,8 @@ function parseDToPolyline(d) {
   const re = /([MLC])([^MLCZ]*)/gi;
   let m;
   while ((m = re.exec(d))) {
-    const nums = (m[2].match(/-?\d*\.?\d+/g) || []).map(Number);
+    // 支持科学计数法（svgpathtools 输出的极小坐标可能带 e 指数）
+    const nums = (m[2].match(/-?\d*\.?\d+(?:e[+-]?\d+)?/gi) || []).map(Number);
     const cmd = m[1].toUpperCase();
     if (cmd === 'M' || cmd === 'L') {
       for (let i = 0; i + 1 < nums.length; i += 2) pts.push([nums[i], nums[i + 1]]);
@@ -251,7 +255,14 @@ function buildGroupSync(p) {
       scaleX: 1, scaleY: 1,
       selectable: false, evented: false,
     });
-    return new fabric.Group([white, img, dieLine], { partId: p.id, cornerSize: 8, transparentCorners: false });
+    const grp = new fabric.Group([white, img, dieLine], { partId: p.id, cornerSize: 8, transparentCorners: false });
+    // 组包围盒左上 → 主体帧原点的偏移（切割坐标换算用）：
+    // 白边小于主体边距时组包围盒=主体图（偏移 0）；白边更大时=刀模包围盒（偏移=minx-0.5，含描边半宽）
+    grp.frameOffX = Math.min(0, minx - 0.5);
+    grp.frameOffY = Math.min(0, miny - 0.5);
+    // 刀模环（主体帧坐标）：导出框内判定用（组 bbox 含透明主体图边距会偏大）
+    grp.dieRingF = die;
+    return grp;
   }
   // 固定白边模式：image_base64 + dieline_path
   const img = new fabric.Image(el, { scaleX: 1, scaleY: 1, selectable: false, evented: false });
@@ -294,7 +305,10 @@ function markLocked(o) {
 }
 function markFree(o) {
   o.locked = false;
+  // 绕中心归零：fabric set angle 绕原点（左上）旋转，直接归零零件会跳位
+  const c = o.getCenterPoint();
   o.set({ angle: 0, borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
+  o.setPositionByOrigin(c, 'center', 'center');
   o.setCoords();
   pushSnapshot();
 }
@@ -305,7 +319,11 @@ function rebuildPart(id) {
   if (!old) return;
   const grp = buildGroupSync(partData.get(id));
   if (!grp) return;
-  grp.set({ left: old.left, top: old.top, scaleX: old.scaleX, scaleY: old.scaleY, angle: old.angle });
+  // 中心锚定：白边变化时组尺寸改变，若沿用左上角会使零件向右下漂移
+  const c = old.getCenterPoint();
+  grp.set({ scaleX: old.scaleX, scaleY: old.scaleY, angle: old.angle });
+  grp.setPositionByOrigin(c, 'center', 'center');
+  grp.setCoords();
   // 保留锁角状态：如已锁角则继承洋红标记
   grp.locked = old.locked;
   if (grp.locked) {
@@ -328,17 +346,23 @@ const redoStack = [];   // redo 暂存
 const UNDO_MAX  = 50;   // 最大栈深
 
 // 生成当前场景快照
+// 零件 transform 记录为绝对「中心坐标+角度+缩放」：多选 ActiveSelection 内
+// 对象的 left/top/angle 是相对选区的坐标，直接记录会在撤销时错位，
+// 故统一经 calcTransformMatrix 分解取绝对值。
 function snapshot() {
   const activeIds = [...objById.keys()];
   const tf = {};
   for (const [id, g] of objById.entries()) {
-    tf[id] = {
-      left:   g.left,
-      top:    g.top,
-      scaleX: g.scaleX,
-      angle:  g.angle || 0,
-      locked: !!g.locked,
-    };
+    let cx, cy, sx, ang;
+    if (g.group) {
+      // 处于多选选区内：取绝对变换
+      const d = fabric.util.qrDecompose(g.calcTransformMatrix());
+      cx = d.translateX; cy = d.translateY; sx = d.scaleX; ang = d.angle;
+    } else {
+      const c = g.getCenterPoint();
+      cx = c.x; cy = c.y; sx = g.scaleX || 1; ang = g.angle || 0;
+    }
+    tf[id] = { cx, cy, scaleX: sx, angle: ang, locked: !!g.locked };
   }
   return {
     activeIds,
@@ -361,6 +385,8 @@ function pushSnapshot() {
 
 // 应用快照：重建场景至 s 描述的状态
 async function applySnapshot(s) {
+  // 先取消选区：选区存在时对成员 set 的坐标是相对坐标，会错位
+  canvas.discardActiveObject();
   // 1. 全局参数
   borderPx = s.g.borderPx;
   // 纸张尺寸（如有变化）
@@ -408,18 +434,17 @@ async function applySnapshot(s) {
     }
   }
 
-  // 3. 应用每个零件 transform
+  // 3. 应用每个零件 transform（中心坐标锚定，与快照记录格式一致）
   for (const id of s.activeIds) {
     const g  = objById.get(id);
     const tf = s.tf[id];
     if (!g || !tf) continue;
     g.set({
-      left:   tf.left,
-      top:    tf.top,
       scaleX: tf.scaleX,
       scaleY: tf.scaleX,   // 等比缩放
       angle:  tf.angle,
     });
+    g.setPositionByOrigin(new fabric.Point(tf.cx, tf.cy), 'center', 'center');
     g.setCoords();
     // 锁角标记（内联设置，不触发 pushSnapshot）
     if (tf.locked) {
@@ -451,10 +476,10 @@ function rebuildPartInPlace(id, tf) {
   if (!grp) return;
   if (tf) {
     grp.set({
-      left: tf.left, top: tf.top,
       scaleX: tf.scaleX, scaleY: tf.scaleX,
       angle: tf.angle,
     });
+    grp.setPositionByOrigin(new fabric.Point(tf.cx, tf.cy), 'center', 'center');
     grp.setCoords();
     if (tf.locked) {
       grp.locked = true;
@@ -473,6 +498,7 @@ function rebuildPartInPlace(id, tf) {
 // 撤销
 async function undo() {
   if (undoStack.length < 2) return;   // 保留基线快照
+  if (cutPreview) cancelCutPreview(); // 未确认的切割预览随撤销一并取消
   redoStack.push(undoStack[undoStack.length - 1]);
   undoStack.pop();
   await applySnapshot(undoStack[undoStack.length - 1]);
@@ -482,6 +508,7 @@ async function undo() {
 // 重做
 async function redo() {
   if (!redoStack.length) return;
+  if (cutPreview) cancelCutPreview();
   const s = redoStack.pop();
   undoStack.push(s);
   await applySnapshot(s);
@@ -555,6 +582,8 @@ const rng  = document.getElementById('border-range');
 const num  = document.getElementById('border-num');
 const unit = document.getElementById('border-unit');
 function setBorderFromMm(mm) {
+  // 先取消选区：选区内对象坐标是相对坐标，重建时读中心会错位
+  canvas.discardActiveObject();
   borderPx = mm * PIXEL_RATIO;
   for (const id of objById.keys()) { if (partData.get(id).kind === 'parametric') rebuildPart(id); }
   canvas.requestRenderAll();
@@ -594,6 +623,14 @@ function applyPageSize(wMm, hMm) {
   if (pageRect) {
     pageRect.set({ width: pageWpx, height: pageHpx });
     pageRect.setCoords();
+  }
+  // 同步输入框（撤销恢复页尺寸时 UI 不脱节；程序赋值不触发 onchange）
+  if (pageUnitSel.value === 'px') {
+    pageWInput.value = Math.round(wMm * PIXEL_RATIO);
+    pageHInput.value = Math.round(hMm * PIXEL_RATIO);
+  } else {
+    pageWInput.value = wMm;
+    pageHInput.value = hMm;
   }
   canvas.requestRenderAll();
   // 通知后端
@@ -673,20 +710,39 @@ canvas.on('object:rotating', (e) => {
   }
 });
 // object:modified 兜底：修改后 angle 非 0 则锁定；所有移动/缩放/旋转完成时推快照
+// 多选 ActiveSelection 的变换也要推快照（成员绝对角度非 0 时锁角）
 canvas.on('object:modified', (e) => {
   const o = e.target;
-  if (o && o.partId) {
+  if (!o) return;
+  if (o.partId) {
     if (o.angle !== 0 && !o.locked) {
       o.locked = true;
       o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
       setStatus('已锁角（按 L 解锁归零）');
     }
     pushSnapshot();
+    return;
+  }
+  if (o.type === 'activeSelection' || o.type === 'activeselection') {
+    let anyPart = false;
+    o.getObjects().forEach(m => {
+      if (!m.partId) return;
+      anyPart = true;
+      const d = fabric.util.qrDecompose(m.calcTransformMatrix());
+      if (Math.abs(d.angle) > 0.5 && !m.locked) {
+        m.locked = true;
+        m.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+        setStatus('已锁角（按 L 解锁归零）');
+      }
+    });
+    if (anyPart) pushSnapshot();
   }
 });
 
 // —— L 键解锁：选中锁角零件 → angle 归 0，恢复蓝色框 ——
 window.addEventListener('keydown', (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
   if (e.key === 'l' || e.key === 'L') {
     const o = canvas.getActiveObject();
     if (o && o.partId && o.locked) {
@@ -698,6 +754,26 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// —— 零件的「刀模」场景包围盒（旋转/缩放感知）——
+// 参数化组的 bbox 含透明主体图边距（旋转时更是外接矩形松弛），直接用会把
+// 贴边零件误判为框外；这里用刀模环逐点经组变换矩阵映射，得到精确范围。
+function dieSceneBBox(o) {
+  if (!o.dieRingF || !o.dieRingF.length) return o.getBoundingRect(true);
+  const m = o.calcTransformMatrix();
+  const bx = o.frameOffX || 0, by = o.frameOffY || 0;
+  const hw = o.width / 2, hh = o.height / 2;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [fx, fy] of o.dieRingF) {
+    // 主体帧 → 组局部（bbox 左上原点）→ 组中心原点 → 场景
+    const p = fabric.util.transformPoint(new fabric.Point(fx - bx - hw, fy - by - hh), m);
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { left: minX, top: minY, width: maxX - minX, height: maxY - minY };
+}
+
 // —— 导出 PNG -> /api/export（含框外过滤）——
 document.getElementById('btn-export').onclick = async () => {
   // 计算所有零件中哪些完全在纸框内（物理坐标比较）
@@ -707,16 +783,20 @@ document.getElementById('btn-export').onclick = async () => {
   const insideParts = [];
   const outsideParts = [];
 
+  // 判定容差：排版把刀模缓冲 spacing/2 贴到页边，加上前后端刀模几何的微小差异，
+  // 允许 2px 内的越界视为在页内
+  const EDGE_TOL = 2;
   for (const o of allParts) {
-    // 获取 group 的物理 bbox（不受 viewport 影响）
-    const l = o.left;
-    const t = o.top;
-    const w = o.getScaledWidth();
-    const h = o.getScaledHeight();
-    const r = l + w;
-    const b = t + h;
+    // 刀模的物理 bbox（旋转/缩放感知，不受 viewport 影响）
+    // 原实现用组 left/top+未旋转宽高：旋转零件 left/top 是原点位置而非 bbox 左上，
+    // 且组 bbox 含透明主体图边距，均会误判
+    const br = dieSceneBBox(o);
+    const l = br.left;
+    const t = br.top;
+    const r = br.left + br.width;
+    const b = br.top + br.height;
     // 判断是否完全在纸框内（含边界）
-    if (l >= 0 && t >= 0 && r <= pageWpx && b <= pageHpx) {
+    if (l >= -EDGE_TOL && t >= -EDGE_TOL && r <= pageWpx + EDGE_TOL && b <= pageHpx + EDGE_TOL) {
       insideParts.push(o);
     } else {
       outsideParts.push(o);
@@ -755,21 +835,29 @@ document.getElementById('btn-export').onclick = async () => {
   finally { hideProgress(); }
 };
 
-// —— 删除选中（只移出画布和 objById，保留 partData/imgElById 供 undo 重建）——
+// —— 删除选中（支持多选；只移出画布和 objById，保留 partData/imgElById 供 undo 重建）——
 document.getElementById('btn-delete').onclick = () => {
   const t = canvas.getActiveObject();
-  if (t && t.partId) {
-    canvas.remove(t);
-    canvas.discardActiveObject();
-    objById.delete(t.partId);
+  if (!t) return;
+  const targets = (t.type === 'activeSelection' || t.type === 'activeselection')
+    ? t.getObjects().slice() : [t];
+  const parts = targets.filter(o => o.partId);
+  if (!parts.length) return;
+  // 先取消选区，使成员坐标恢复为绝对坐标再移除
+  canvas.discardActiveObject();
+  for (const o of parts) {
+    canvas.remove(o);
+    objById.delete(o.partId);
     // partData/imgElById 保留，不删
-    canvas.requestRenderAll();
-    pushSnapshot();
   }
+  canvas.requestRenderAll();
+  pushSnapshot();
 };
 
 // —— 整理排版 -> /api/nest（旋转感知 BLF，中心+角度，间距，统一缩放）——
 document.getElementById('btn-tidy').onclick = async () => {
+  // 先取消选区：选区内对象的 setPositionByOrigin 是相对坐标，会错位
+  canvas.discardActiveObject();
   // 构建 items：包含 id、当前 scale、角度、锁角状态
   const items = [...objById.values()].map(o => ({
     id:     o.partId,
@@ -846,6 +934,8 @@ let cutPreview = null;
 
 // 切割模式：进入/退出
 function enterCutMode() {
+  // 若处于修补模式，先退出（两模式互斥，避免事件处理器叠加）
+  if (brushMode) exitBrushMode();
   cutMode = true;
   document.getElementById('btn-cut').classList.add('active');
   // 禁止所有零件拖拽，但保留可选
@@ -1004,12 +1094,15 @@ canvas.on('mouse:up', async function (opt) {
   cutDragTarget = null;
 
   // 画布坐标 → 零件局部物理坐标
+  // 参数化零件发送「主体帧」坐标（组包围盒左上 + frameOff 偏移）；固定零件 frameOff=0
   const scaleX = group.scaleX || 1;
   const scaleY = group.scaleY || 1;
-  const x1 = (cutStart.x   - group.left) / scaleX;
-  const y1 = (cutStart.y   - group.top)  / scaleY;
-  const x2 = (sceneEnd.x   - group.left) / scaleX;
-  const y2 = (sceneEnd.y   - group.top)  / scaleY;
+  const fox = group.frameOffX || 0;
+  const foy = group.frameOffY || 0;
+  const x1 = (cutStart.x   - group.left) / scaleX + fox;
+  const y1 = (cutStart.y   - group.top)  / scaleY + foy;
+  const x2 = (sceneEnd.x   - group.left) / scaleX + fox;
+  const y2 = (sceneEnd.y   - group.top)  / scaleY + foy;
 
   const partId = group.partId;
   cutStart = null;
@@ -1195,16 +1288,17 @@ window.addEventListener('keydown', (e) => {
 function sceneToSubjectPx(group, sceneX, sceneY) {
   const pd  = partData.get(group.partId);
   if (!pd) return null;
-  // group 内 img 的 left/top（subject_image 在 group 内位置 = -minx, -miny）
+  // group 内 img 的 left/top：fabric 分组后子对象坐标以「组中心」为基准（非组左上角）
   const objs = group._objects;
   // 参数化 group 的 image 子对象在索引 1
   const imgChild = objs && objs.length >= 2 ? objs[1] : null;
   if (!imgChild) return null;
-  // subject_image 左上角在场景（物理）坐标：
+  // subject_image 左上角在场景（物理）坐标 = 组中心 + 子对象偏移×缩放
   const scaleX = group.scaleX || 1;
   const scaleY = group.scaleY || 1;
-  const subjOriginX = group.left + imgChild.left * scaleX;
-  const subjOriginY = group.top  + imgChild.top  * scaleY;
+  const gc = group.getCenterPoint();
+  const subjOriginX = gc.x + imgChild.left * scaleX;
+  const subjOriginY = gc.y + imgChild.top  * scaleY;
   const px = (sceneX - subjOriginX) / scaleX;
   const py = (sceneY - subjOriginY) / scaleY;
   // 边界钳位
@@ -1260,6 +1354,11 @@ canvas.on('mouse:down', function (opt) {
   const pd = partData.get(target.partId);
   if (!pd || pd.kind !== 'parametric') {
     setStatus('修补：仅支持参数化零件');
+    return;
+  }
+  // 旋转零件的场景→主体帧映射未处理角度，先归零再修补
+  if (Math.abs(target.angle || 0) > 0.5) {
+    setStatus('修补：请先按 L 将零件角度归零再修补');
     return;
   }
 

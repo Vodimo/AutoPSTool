@@ -106,19 +106,32 @@ def api_set_bleed():
 
 @app.route("/api/cut", methods=["POST"])
 def api_cut():
-    """切割零件：commit=false 仅预览（不改 PARTS），commit=true 删原件加两块。"""
+    """切割零件：commit=false 仅预览（不改 PARTS），commit=true 两块入库（原件保留，供撤销重建）。
+
+    坐标帧约定：参数化零件的切割坐标为「主体帧」（subject_image 局部坐标，与前端
+    group 包围盒一致）；固定零件为 image_layer 局部坐标。参数化实体化后的局部原点
+    = 主体帧内刀模包围盒左上（= 主体 bbox 左上各向外扩 offset_px），需先平移换算。
+    """
     d = _require_json("id", "x1", "y1", "x2", "y2")
     commit = bool(d.get("commit", False))
     part = PARTS.get(d["id"])
     if part is None:
         return jsonify({"error": "part not found"}), 404
+    x1, y1 = float(d["x1"]), float(d["y1"])
+    x2, y2 = float(d["x2"]), float(d["y2"])
     # 参数化零件先实体化，固定零件直接使用
     if part.subject_outline:
         mp = part_builder.materialize_parametric(part, OFFSET_MM)
+        # 主体帧 → 实体化零件局部帧
+        offset_px = g.mm_to_px(OFFSET_MM)
+        alpha = (part.subject_image[:, :, 3] > 0).astype(np.uint8) * 255
+        sx, sy, _, _ = cv2.boundingRect(alpha)
+        fx, fy = sx - offset_px, sy - offset_px
+        x1 -= fx; y1 -= fy
+        x2 -= fx; y2 -= fy
     else:
         mp = part
-    a, b = part_builder.cut_part(mp, (d["x1"], d["y1"]), (d["x2"], d["y2"]),
-                                  bleed_mm=BLEED_MM)
+    a, b = part_builder.cut_part(mp, (x1, y1), (x2, y2), bleed_mm=BLEED_MM)
     pieces = [x for x in (a, b) if x is not None]
     if commit:
         for piece in pieces:
@@ -151,7 +164,7 @@ def api_brush():
       - id: 零件 id
       - stroke_b64: 与 subject_image 同尺寸的笔迹掩膜 PNG（白=涂抹处）data-url base64
       - mode: 'add' | 'erase'
-    返回：{parts: [...]}，旧 id 从 PARTS 删除，新块入库。
+    返回：{parts: [...]}，新块入库，原件保留（供撤销重建）。
     """
     d = _require_json("id", "stroke_b64", "mode")
     part = PARTS.get(d["id"])
@@ -241,8 +254,8 @@ def api_export():
         p = PARTS.get(it["id"])
         if p is None:
             continue
-        p.scale = it.get("scale", 1.0)
-        p.rotation = it.get("angle", 0.0)
+        p.scale = float(it.get("scale", 1.0))
+        p.rotation = float(it.get("angle", 0.0))
         if "cx" in it:
             # 新契约：cx/cy 为视觉中心（物理 px）
             p.cx = float(it["cx"])

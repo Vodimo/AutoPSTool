@@ -149,8 +149,10 @@ def test_cut_preview_no_mutate():
     """commit=false 仅预览不改 PARTS；commit=true 保留原件并加两块。"""
     part = _make_parametric_part("cutprev")
     client = server.app.test_client()
-    mid_x = part.w // 2
-    payload = {"id": "cutprev", "x1": mid_x, "y1": 0, "x2": mid_x, "y2": part.h}
+    # 切割坐标为主体帧（subject_image 局部坐标）
+    fh, fw = part.subject_image.shape[:2]
+    mid_x = fw // 2
+    payload = {"id": "cutprev", "x1": mid_x, "y1": 0, "x2": mid_x, "y2": fh}
 
     # 预览：不改 PARTS，原 id 仍存在
     r = client.post("/api/cut", json={**payload, "commit": False})
@@ -168,3 +170,20 @@ def test_cut_preview_no_mutate():
     assert "cutprev" in server.PARTS, "commit=true 应保留原件（支持 undo）"
     for nid in new_ids:
         assert nid in server.PARTS, f"新零件 {nid} 应已入库"
+
+
+def test_cut_parametric_frame_alignment():
+    """帧换算回归：主体帧坐标过对称主体中心竖切 → 两块宽度近似相等。
+    换算错误（如按刀模帧解释）会使切线偏移 主体边距-白边 ≈ 4mm，两块明显不等宽。"""
+    part = _make_parametric_part("cutframe")
+    client = server.app.test_client()
+    fh, fw = part.subject_image.shape[:2]
+    mid = fw / 2
+    r = client.post("/api/cut", json={"id": "cutframe", "x1": mid, "y1": 0,
+                                       "x2": mid, "y2": fh, "commit": False})
+    assert r.status_code == 200
+    pieces = r.get_json()["parts"]
+    assert len(pieces) == 2, "过中心竖切应产生两块"
+    w0, w1 = pieces[0]["w"], pieces[1]["w"]
+    assert abs(w0 - w1) <= 0.15 * max(w0, w1), \
+        f"过对称中心切割两块宽度应接近：{w0} vs {w1}"

@@ -28,10 +28,18 @@ def _base_poly(part, offset_px: float):
 
 
 def _footprint(base_poly, scale: float, angle_deg: float):
-    """按 scale 缩放后绕自身质心旋转 angle_deg 度，返回 footprint 多边形。"""
+    """按 scale 缩放后绕未旋转包围盒中心旋转 angle_deg 度。
+    返回 (footprint, anchor)：anchor = 未旋转包围盒中心（旋转不动点）。
+
+    锚点必须与前端/导出一致：fabric group 与导出 tile 均以「未旋转包围盒中心」
+    为旋转/摆放锚点。若这里用质心，不对称零件在渲染时会相对碰撞几何整体偏移，
+    间距小时可能产生实际重叠。
+    """
     p = shapely.affinity.scale(base_poly, scale, scale, origin=(0, 0))
-    p = shapely.affinity.rotate(p, angle_deg, origin='centroid')
-    return p
+    minx, miny, maxx, maxy = p.bounds
+    anchor = ((minx + maxx) / 2.0, (miny + maxy) / 2.0)
+    p = shapely.affinity.rotate(p, angle_deg, origin=anchor)
+    return p, anchor
 
 
 def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
@@ -45,7 +53,7 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
     """
     # 按旋转 0° 时的 footprint 面积降序排列，大零件优先
     def _area_key(part):
-        return _footprint(_base_poly(part, offset_px), part.scale, 0).area
+        return _footprint(_base_poly(part, offset_px), part.scale, 0)[0].area
 
     items = sorted(parts, key=_area_key, reverse=True)
     placed = []  # [(prepared_poly, (minx,miny,maxx,maxy))]
@@ -64,14 +72,13 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
         best = None  # (cy_top, cx_left, fp_buf, dx, dy, angle, cx, cy)
 
         for angle in candidate_angles:
-            fp = _footprint(base, part.scale, angle)
+            fp, anchor = _footprint(base, part.scale, angle)
             fminx, fminy, fmaxx, fmaxy = fp.bounds
             fw = fmaxx - fminx
             fh = fmaxy - fminy
             # 每角度只 buffer 一次；后续靠算术 + 平移
             fp_buf = fp.buffer(spacing_px / 2.0, join_style=2)
             bminx, bminy, bmaxx, bmaxy = fp_buf.bounds
-            fc = fp.centroid
 
             max_y = max(1, int(page_h - fh) + 1)
             max_x = max(1, int(page_w - fw) + 1)
@@ -101,7 +108,7 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
                             continue
                     # 命中(最靠左上)
                     best = (cy_top, cx_left, fp_buf, dx, dy, angle,
-                            fc.x + dx, fc.y + dy)
+                            anchor[0] + dx, anchor[1] + dy)
                     found_for_angle = True
                     break
 
@@ -137,7 +144,7 @@ def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
         grid_step: 网格扫描步长（像素）。
         page_px: (page_w, page_h) 元组（像素），None 用 A4。
 
-    放不下的零件设 cx=cy=x=y=-1，放下的设质心 cx/cy 与包围盒左上 x/y。
+    放不下的零件设 cx=cy=x=y=-1，放下的设锚点（未旋转包围盒中心）cx/cy 与包围盒左上 x/y。
     """
     if offset_mm is None:
         offset_mm = g.OFFSET_MM
@@ -157,7 +164,7 @@ def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
     if uniform_scale:
         # 估算使总面积约占页面 72% 的全局缩放系数
         total_area = sum(
-            max(_footprint(_base_poly(p, offset_px), p.scale, 0).area, 1.0)
+            max(_footprint(_base_poly(p, offset_px), p.scale, 0)[0].area, 1.0)
             for p in parts
         )
         page_area = page_w * page_h
@@ -196,12 +203,10 @@ def part_polygon(part, offset_mm=None):
     offset_px = g.mm_to_px(offset_mm)
 
     base = _base_poly(part, offset_px)
-    fp = _footprint(base, part.scale, part.rotation)
+    fp, anchor = _footprint(base, part.scale, part.rotation)
 
-    # 若零件已放置，将质心对齐到 (cx, cy)
+    # 若零件已放置，将锚点（未旋转包围盒中心）对齐到 (cx, cy)
     if part.cx is not None and part.cx >= 0:
-        cur_cx = fp.centroid.x
-        cur_cy = fp.centroid.y
-        fp = shapely.affinity.translate(fp, part.cx - cur_cx, part.cy - cur_cy)
+        fp = shapely.affinity.translate(fp, part.cx - anchor[0], part.cy - anchor[1])
 
     return fp

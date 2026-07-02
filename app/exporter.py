@@ -16,12 +16,18 @@ def _draw_polyline(draw, pts, fill, width=2):
         draw.line(pts + [pts[0]], fill=fill, width=width)
 
 
+# tile 四周对称留白（px）：刀模描边宽 2px 且居中于轮廓，
+# 无留白时贴着包围盒边缘的描边会被裁掉一半
+TILE_PAD = 2
+
+
 def _build_tile(part, offset_px: float) -> tuple["Image.Image", float, float]:
-    """构建未旋转的 RGBA tile，返回 (tile, tile_w0, tile_h0)。
+    """构建未旋转的 RGBA tile，返回 (tile, content_w, content_h)。
 
     参数化零件：白多边形 + 主体图 + 洋红刀模线，以 poly 局部坐标为基准。
     固定零件：image_layer 缩放 + 洋红刀模线。
-    返回 tile_w0/h0 为未旋转时的宽/高（浮点，供居中计算用）。
+    tile 四周各留 TILE_PAD（对称，故内容中心 = tile 中心，锚点不变）；
+    返回 content_w/h 为不含留白的内容宽/高（浮点，供旧契约 x/y 居中计算用）。
     """
     s = part.scale
 
@@ -31,14 +37,15 @@ def _build_tile(part, offset_px: float) -> tuple["Image.Image", float, float]:
         if poly.is_empty:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0)), 1.0, 1.0
         minx, miny, maxx, maxy = poly.bounds
-        tw = max(1, math.ceil((maxx - minx) * s))
-        th = max(1, math.ceil((maxy - miny) * s))
-        tile = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        cw = max(1, math.ceil((maxx - minx) * s))
+        ch = max(1, math.ceil((maxy - miny) * s))
+        tile = Image.new("RGBA", (cw + 2 * TILE_PAD, ch + 2 * TILE_PAD), (0, 0, 0, 0))
         draw = ImageDraw.Draw(tile)
 
         # 白底多边形（tile 局部坐标）
         ring = list(poly.exterior.coords)
-        local_pts = [((px - minx) * s, (py - miny) * s) for (px, py) in ring]
+        local_pts = [((px - minx) * s + TILE_PAD, (py - miny) * s + TILE_PAD)
+                     for (px, py) in ring]
         if len(local_pts) >= 3:
             draw.polygon(local_pts, fill=(255, 255, 255, 255))
 
@@ -49,31 +56,34 @@ def _build_tile(part, offset_px: float) -> tuple["Image.Image", float, float]:
                 (max(1, int(subj.width * s)), max(1, int(subj.height * s))),
                 Image.LANCZOS,
             )
-        sx_off = int(round((0 - minx) * s))
-        sy_off = int(round((0 - miny) * s))
+        sx_off = int(round((0 - minx) * s)) + TILE_PAD
+        sy_off = int(round((0 - miny) * s)) + TILE_PAD
         tile.alpha_composite(subj, (sx_off, sy_off))
 
         # 洋红刀模线
         _draw_polyline(draw, local_pts, g.DIECUT_RGB + (255,))
-    else:
-        # —— 固定零件 ——
-        layer = Image.fromarray(part.image_layer, mode="RGBA")
-        if s != 1.0:
-            layer = layer.resize(
-                (max(1, int(part.w * s)), max(1, int(part.h * s))), Image.LANCZOS
-            )
-        tile = layer.copy()
-        draw = ImageDraw.Draw(tile)
-        src = part.dieline_path
-        if src:
-            for poly in vz.path_to_polylines(src):
-                pts = [(px * s, py * s) for (px, py) in poly]
-                _draw_polyline(draw, pts, g.DIECUT_RGB + (255,))
-        else:
-            pts = [(px * s, py * s) for (px, py) in part.contour]
-            _draw_polyline(draw, pts, g.DIECUT_RGB + (255,))
+        return tile, float(cw), float(ch)
 
-    return tile, float(tile.width), float(tile.height)
+    # —— 固定零件 ——
+    layer = Image.fromarray(part.image_layer, mode="RGBA")
+    if s != 1.0:
+        layer = layer.resize(
+            (max(1, int(part.w * s)), max(1, int(part.h * s))), Image.LANCZOS
+        )
+    tile = Image.new("RGBA", (layer.width + 2 * TILE_PAD, layer.height + 2 * TILE_PAD),
+                     (0, 0, 0, 0))
+    tile.alpha_composite(layer, (TILE_PAD, TILE_PAD))
+    draw = ImageDraw.Draw(tile)
+    src = part.dieline_path
+    if src:
+        for poly in vz.path_to_polylines(src):
+            pts = [(px * s + TILE_PAD, py * s + TILE_PAD) for (px, py) in poly]
+            _draw_polyline(draw, pts, g.DIECUT_RGB + (255,))
+    else:
+        pts = [(px * s + TILE_PAD, py * s + TILE_PAD) for (px, py) in part.contour]
+        _draw_polyline(draw, pts, g.DIECUT_RGB + (255,))
+
+    return tile, float(layer.width), float(layer.height)
 
 
 def render_png(parts, offset_mm=None, page_px=None):
@@ -89,8 +99,11 @@ def render_png(parts, offset_mm=None, page_px=None):
     canvas = Image.new("RGBA", page_px, (255, 255, 255, 255))
 
     for part in parts:
-        # 跳过未放置零件：cx/cy 均为 None 时依赖 x,y；x<0 则跳过
-        if part.cx is None and (part.x < 0 or part.y < 0):
+        # 跳过未放置零件：新契约 cx<0，旧契约 x/y<0，均表示排版未成功
+        if part.cx is not None:
+            if part.cx < 0 or part.cy < 0:
+                continue
+        elif part.x < 0 or part.y < 0:
             continue
 
         tile, tile_w0, tile_h0 = _build_tile(part, offset_px)
