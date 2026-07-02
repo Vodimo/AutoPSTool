@@ -128,8 +128,11 @@ def test_apply_brush_erase_split():
     mid_x = em_w // 2
     cv2.rectangle(stroke, (mid_x - 20, 0), (mid_x + 20, em_h), 255, -1)
 
-    pieces = pb.apply_brush(part, stroke, "erase")
-    assert len(pieces) == 2, f"擦断细桥应分裂为 2 块，实际返回 {len(pieces)} 块"
+    results = pb.apply_brush(part, stroke, "erase")
+    assert len(results) == 2, f"擦断细桥应分裂为 2 块，实际返回 {len(results)} 块"
+    # 帧偏移：两块的新主体帧原点应分别落在旧帧左/右半区（对齐回原位用）
+    offs = sorted(dx for _, (dx, _) in results)
+    assert offs[0] < offs[1], "两块的 frame_dx 应不同（左右两块）"
 
 
 def test_apply_brush_add_grows():
@@ -143,7 +146,7 @@ def test_apply_brush_add_grows():
     # 先擦掉一块(左半)
     erase_stroke = np.zeros((em_h, em_w), np.uint8)
     erase_stroke[:, :em_w // 2] = 255
-    erased = pb.apply_brush(part, erase_stroke, "erase")
+    erased = [p for p, _ in pb.apply_brush(part, erase_stroke, "erase")]
     assert len(erased) >= 1
 
     # 再加回(同一笔迹)→ 面积应大于擦后
@@ -153,7 +156,7 @@ def test_apply_brush_add_grows():
         add_stroke = np.zeros((erased_part.edit_mask.shape[0], erased_part.edit_mask.shape[1]), np.uint8)
         # 对 erased_part 的帧，在右侧加白笔迹
         add_stroke[:, erased_part.edit_mask.shape[1] // 2:] = 255
-        added = pb.apply_brush(erased_part, add_stroke, "add")
+        added = [p for p, _ in pb.apply_brush(erased_part, add_stroke, "add")]
         added_area = sum(int(np.count_nonzero(p.edit_mask)) for p in added)
         assert added_area > erased_area, "add 笔迹后面积应增大"
 

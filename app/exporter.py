@@ -21,7 +21,7 @@ def _draw_polyline(draw, pts, fill, width=2):
 TILE_PAD = 2
 
 
-def _build_tile(part, offset_px: float) -> tuple["Image.Image", float, float]:
+def _build_tile(part, offset_px: float, smooth_iters: int = 0) -> tuple["Image.Image", float, float]:
     """构建未旋转的 RGBA tile，返回 (tile, content_w, content_h)。
 
     参数化零件：白多边形 + 主体图 + 洋红刀模线，以 poly 局部坐标为基准。
@@ -33,7 +33,7 @@ def _build_tile(part, offset_px: float) -> tuple["Image.Image", float, float]:
 
     if part.subject_outline:
         # —— 参数化零件 ——
-        poly = border.dieline_polygon(part.subject_outline, offset_px)
+        poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters)
         if poly.is_empty:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0)), 1.0, 1.0
         minx, miny, maxx, maxy = poly.bounds
@@ -86,10 +86,11 @@ def _build_tile(part, offset_px: float) -> tuple["Image.Image", float, float]:
     return tile, float(layer.width), float(layer.height)
 
 
-def render_png(parts, offset_mm=None, page_px=None):
+def render_png(parts, offset_mm=None, page_px=None, smooth_iters=0):
     """RGBA 画布：每个零件渲染 tile → 按 rotation 旋转 → 居中粘贴。
     page_px=(宽,高) 指定输出分辨率，默认 A4 (2100×2970)。
     part.cx/cy 给定则以其为中心；否则以 (x + tile_w0/2, y + tile_h0/2) 为中心（向后兼容）。
+    smooth_iters: 刀模 Chaikin 平滑迭代数（与前端画布一致）。
     """
     if offset_mm is None:
         offset_mm = g.OFFSET_MM
@@ -106,7 +107,7 @@ def render_png(parts, offset_mm=None, page_px=None):
         elif part.x < 0 or part.y < 0:
             continue
 
-        tile, tile_w0, tile_h0 = _build_tile(part, offset_px)
+        tile, tile_w0, tile_h0 = _build_tile(part, offset_px, smooth_iters)
         if tile.width <= 1 and tile.height <= 1:
             continue
 
@@ -128,5 +129,6 @@ def render_png(parts, offset_mm=None, page_px=None):
     return canvas
 
 
-def save_png(parts, out_path, offset_mm=None, page_px=None):
-    render_png(parts, offset_mm=offset_mm, page_px=page_px).save(out_path)
+def save_png(parts, out_path, offset_mm=None, page_px=None, smooth_iters=0):
+    render_png(parts, offset_mm=offset_mm, page_px=page_px,
+               smooth_iters=smooth_iters).save(out_path)

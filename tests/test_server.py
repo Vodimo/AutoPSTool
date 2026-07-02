@@ -78,6 +78,41 @@ def test_set_page_updates_session():
     assert r3.status_code == 400, f"w_mm=0 应返回 400，实际 {r3.status_code}"
 
 
+def test_set_smooth():
+    """POST /api/set_smooth 更新全局 SMOOTH_ITERS；越界返回 400。"""
+    client = server.app.test_client()
+    r = client.post("/api/set_smooth", json={"smooth_iters": 2})
+    assert r.status_code == 200
+    assert server.SMOOTH_ITERS == 2
+    r2 = client.post("/api/set_smooth", json={"smooth_iters": 9})
+    assert r2.status_code == 400, "smooth_iters>4 应返回 400"
+    # 还原
+    client.post("/api/set_smooth", json={"smooth_iters": 0})
+
+
+def test_nest_async_progress():
+    """async 模式：POST 返回 job，轮询 /api/nest_progress 直到拿到 positions。"""
+    import time
+    server.PARTS["a"] = _fake_part("a")
+    server.PARTS["b"] = _fake_part("b")
+    client = server.app.test_client()
+    r = client.post("/api/nest", json={"items": [{"id": "a"}, {"id": "b"}],
+                                        "async": True})
+    assert r.status_code == 200
+    assert r.get_json().get("job") is True
+    positions = None
+    for _ in range(100):  # 最多等 10s
+        s = client.get("/api/nest_progress").get_json()
+        assert s.get("error") in (None, ""), f"排版后台错误: {s.get('error')}"
+        if not s["running"] and s["positions"]:
+            positions = s["positions"]
+            break
+        time.sleep(0.1)
+    assert positions is not None, "后台排版应在超时前完成"
+    pos = {p["id"]: p for p in positions}
+    assert pos["a"]["cx"] >= 0 and pos["b"]["cx"] >= 0
+
+
 def test_segment_returns_subject_fields():
     import numpy as np, cv2, base64
     img = np.full((300, 300, 3), 255, np.uint8)
@@ -138,6 +173,9 @@ def test_brush_endpoint():
     data = r.get_json()
     assert "parts" in data, "响应应含 parts 字段"
     assert len(data["parts"]) >= 1, "擦小角应至少返回 1 个零件"
+    # 帧偏移字段：前端原位对齐用
+    for p in data["parts"]:
+        assert "frame_dx" in p and "frame_dy" in p, "brush 响应应含 frame_dx/frame_dy"
     # 旧 id 应仍在 PARTS（支持 undo）
     assert "brushtest" in server.PARTS, "旧 id 应保留在 PARTS（支持 undo）"
     # 新零件应已入库

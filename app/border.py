@@ -27,8 +27,30 @@ def outer_polyline(outline_d: str) -> list:
     return [[float(x), float(y)] for (x, y) in s.exterior.coords]
 
 
-def dieline_polygon(outline_d: str, offset_px: float) -> Polygon:
-    """主体轮廓向外缓冲 offset_px(圆角)，得到白边外缘=刀模多边形。"""
+def smooth_ring(pts, iterations: int) -> list:
+    """Chaikin 切角平滑：每次迭代把每个顶点替换为相邻边上 1/4、3/4 两点，
+    折角越切越圆（收敛于二次 B 样条）。与前端 JS 版算法一致，保证碰撞/渲染同形。
+
+    pts: [(x,y), ...] 闭合环（首尾不重复）。iterations<=0 原样返回。
+    """
+    ring = [(float(x), float(y)) for x, y in pts]
+    for _ in range(max(0, int(iterations))):
+        if len(ring) < 3:
+            break
+        out = []
+        n = len(ring)
+        for i in range(n):
+            x0, y0 = ring[i]
+            x1, y1 = ring[(i + 1) % n]
+            out.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+            out.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+        ring = out
+    return ring
+
+
+def dieline_polygon(outline_d: str, offset_px: float, smooth_iters: int = 0) -> Polygon:
+    """主体轮廓向外缓冲 offset_px(圆角)，得到白边外缘=刀模多边形。
+    smooth_iters>0 时对结果外环做 Chaikin 平滑（消除轮廓简化留下的直边折线感）。"""
     ring = outer_polyline(outline_d)
     if len(ring) < 3:
         return Polygon()
@@ -38,6 +60,11 @@ def dieline_polygon(outline_d: str, offset_px: float) -> Polygon:
     # 守卫退化几何（GeometryCollection/LineString 等）返回空多边形
     if not isinstance(grown, Polygon):
         return Polygon()
+    if smooth_iters > 0:
+        sm = smooth_ring(list(grown.exterior.coords)[:-1], smooth_iters)
+        cand = Polygon(sm)
+        if cand.is_valid and not cand.is_empty:
+            grown = cand
     return grown
 
 

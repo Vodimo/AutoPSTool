@@ -20,6 +20,7 @@ OFFSET_MM = g.OFFSET_MM  # 全局白边(会话级)，前端 /api/set_border 同�
 BLEED_MM = g.BLEED_MM    # 全局切割出血(会话级)，前端 /api/set_bleed 同步
 PAGE_W_MM = 210           # 全局纸张宽度(mm)，前端 /api/set_page 同步
 PAGE_H_MM = 297           # 全局纸张高度(mm)
+SMOOTH_ITERS = 0          # 全局描边平滑迭代数(0=不平滑)，前端 /api/set_smooth 同步
 
 
 def _decode_image(b64: str):
@@ -180,22 +181,62 @@ def api_brush():
     if mode not in ("add", "erase"):
         abort(400, description="mode 必须是 'add' 或 'erase'")
 
-    pieces = part_builder.apply_brush(part, stroke, mode)
+    results = part_builder.apply_brush(part, stroke, mode)
 
     # 追加新零件，保留原件（支持 undo 重建）
-    for p in pieces:
+    out = []
+    for p, (fdx, fdy) in results:
         PARTS[p.id] = p
+        item = part_to_dict(p)
+        # 新零件主体帧原点在旧主体帧中的坐标：前端据此原位对齐摆放
+        item["frame_dx"] = int(fdx)
+        item["frame_dy"] = int(fdy)
+        out.append(item)
 
-    return jsonify({"parts": [part_to_dict(p) for p in pieces]})
+    return jsonify({"parts": out})
+
+
+# 排版后台任务状态（单用户单任务足够）：/api/nest async 模式写入，/api/nest_progress 轮询
+NEST_JOB = {"running": False, "progress": 1.0, "positions": None, "error": None}
+
+
+def _run_nest(parts, spacing_mm, angle_steps, uniform_scale, offset_mm, page_px,
+              smooth_iters):
+    """后台线程执行排版，进度写入 NEST_JOB。"""
+    def cb(done, total):
+        NEST_JOB["progress"] = done / max(1, total)
+
+    try:
+        nesting.nest(
+            parts,
+            offset_mm=offset_mm,
+            spacing_mm=spacing_mm,
+            angle_steps=angle_steps,
+            uniform_scale=uniform_scale,
+            page_px=page_px,
+            progress_cb=cb,
+            smooth_iters=smooth_iters,
+        )
+        NEST_JOB["positions"] = [
+            {"id": p.id, "cx": p.cx, "cy": p.cy, "angle": p.rotation, "scale": p.scale}
+            for p in parts
+        ]
+    except Exception as e:  # noqa: BLE001 - 后台线程异常需要传回前端
+        NEST_JOB["error"] = str(e)
+    finally:
+        NEST_JOB["running"] = False
 
 
 @app.route("/api/nest", methods=["POST"])
 def api_nest():
+    """排版。默认同步返回 positions；body 带 "async": true 时启动后台任务，
+    立即返回 {"job": true}，进度与结果经 /api/nest_progress 轮询。"""
     d = _require_json("items")
     items = d["items"]
     spacing_mm = float(d.get("spacing_mm", g.PADDING_MM))
     angle_steps = int(d.get("angle_steps", 8))
     uniform_scale = bool(d.get("uniform_scale", False))
+    run_async = bool(d.get("async", False))
 
     parts = []
     for it in items:
@@ -207,13 +248,28 @@ def api_nest():
         p.locked = bool(it.get("locked", False))
         parts.append(p)
 
+    page_px = (g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM))
+
+    if run_async:
+        if NEST_JOB["running"]:
+            abort(409, description="已有排版任务在执行")
+        NEST_JOB.update({"running": True, "progress": 0.0, "positions": None, "error": None})
+        threading.Thread(
+            target=_run_nest,
+            args=(parts, spacing_mm, angle_steps, uniform_scale, OFFSET_MM, page_px,
+                  SMOOTH_ITERS),
+            daemon=True,
+        ).start()
+        return jsonify({"job": True})
+
     nesting.nest(
         parts,
         offset_mm=OFFSET_MM,
         spacing_mm=spacing_mm,
         angle_steps=angle_steps,
         uniform_scale=uniform_scale,
-        page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)),
+        page_px=page_px,
+        smooth_iters=SMOOTH_ITERS,
     )
 
     return jsonify({
@@ -224,12 +280,36 @@ def api_nest():
     })
 
 
+@app.route("/api/nest_progress", methods=["GET"])
+def api_nest_progress():
+    """轮询排版后台任务：{running, progress, positions?, error?}。
+    positions 仅在任务结束后返回一次性读取即可（保留至下次任务覆盖）。"""
+    return jsonify({
+        "running": NEST_JOB["running"],
+        "progress": NEST_JOB["progress"],
+        "positions": None if NEST_JOB["running"] else NEST_JOB["positions"],
+        "error": NEST_JOB["error"],
+    })
+
+
 @app.route("/api/set_border", methods=["POST"])
 def api_set_border():
     global OFFSET_MM
     d = _require_json("offset_mm")
     OFFSET_MM = float(d["offset_mm"])
     return jsonify({"ok": True, "offset_mm": OFFSET_MM})
+
+
+@app.route("/api/set_smooth", methods=["POST"])
+def api_set_smooth():
+    """设置全局描边平滑迭代数（0-4 整数，0=不平滑）。"""
+    global SMOOTH_ITERS
+    d = _require_json("smooth_iters")
+    val = int(d["smooth_iters"])
+    if val < 0 or val > 4:
+        abort(400, description="smooth_iters 必须在 0-4 之间")
+    SMOOTH_ITERS = val
+    return jsonify({"ok": True, "smooth_iters": SMOOTH_ITERS})
 
 
 @app.route("/api/set_page", methods=["POST"])
@@ -270,7 +350,8 @@ def api_export():
             p.cy = None
         parts.append(p)
     img = exporter.render_png(parts, offset_mm=OFFSET_MM,
-                               page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)))
+                               page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)),
+                               smooth_iters=SMOOTH_ITERS)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)

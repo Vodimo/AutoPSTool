@@ -26,6 +26,29 @@ def test_dieline_polygon_bbox_expands_by_offset():
     assert 12 <= minx <= 28 and 172 <= maxx <= 188
 
 
+def test_smooth_ring_chaikin():
+    """Chaikin 平滑：点数每迭代×2；方形折角被切圆（顶点远离原角点）；0 迭代原样。"""
+    square = [(0, 0), (100, 0), (100, 100), (0, 100)]
+    assert border.smooth_ring(square, 0) == [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+    s2 = border.smooth_ring(square, 2)
+    assert len(s2) == 16
+    # 平滑后所有点到最近原角点的距离 > 0（角被切掉）
+    import math
+    for x, y in s2:
+        dmin = min(math.hypot(x - cx, y - cy) for cx, cy in square)
+        assert dmin > 5, "折角应被切圆"
+
+
+def test_dieline_polygon_smooth_keeps_shape():
+    """平滑后的刀模多边形面积与 bbox 变化很小（切角收缩有限）。"""
+    d = _circle_outline_d(r=60)
+    p0 = border.dieline_polygon(d, 20.0)
+    p2 = border.dieline_polygon(d, 20.0, smooth_iters=2)
+    assert 0.97 < (p2.area / p0.area) <= 1.0 + 1e-9
+    b0, b2 = p0.bounds, p2.bounds
+    assert all(abs(a - b) < 4 for a, b in zip(b0, b2))
+
+
 def test_dieline_path_at_is_closed_d():
     d = _circle_outline_d(r=50)
     out = border.dieline_path_at(d, 10.0)

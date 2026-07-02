@@ -124,7 +124,9 @@ def apply_brush(part, stroke_mask, mode) -> list:
         mode: 'add' 或 'erase'。
 
     Returns:
-        新零件列表（每个连通分量一个）；若全擦没则返回 []。
+        [(Part, (frame_dx, frame_dy)), ...]：每个连通分量一个零件；
+        frame_dx/dy = 新零件主体帧原点在旧零件主体帧中的坐标（前端据此
+        把新零件放回原位使图像内容严格对齐，不跳位）。全擦没返回 []。
     """
     em = part.edit_mask.copy()
     # 二值化笔迹
@@ -139,7 +141,10 @@ def apply_brush(part, stroke_mask, mode) -> list:
     out = []
     for c in comps:
         # 复用 build_part：source_bgr 帧 + 该连通分量的掩膜，重新推导白边/刀模/参数化
-        out.append(build_part(part.source_bgr, c))
+        # 新主体帧原点 = 分量 bbox 左上 - SUBJECT_MARGIN（build_part 内部 pad 足够，不会 clamp）
+        sx, sy, _, _ = cv2.boundingRect(c)
+        out.append((build_part(part.source_bgr, c),
+                    (sx - SUBJECT_MARGIN, sy - SUBJECT_MARGIN)))
     return out
 
 

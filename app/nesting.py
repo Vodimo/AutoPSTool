@@ -9,12 +9,13 @@ from app import border, geometry as g
 SIMPLIFY_TOLERANCE_PX = 8  # 碰撞多边形简化容差（像素）
 
 
-def _base_poly(part, offset_px: float):
+def _base_poly(part, offset_px: float, smooth_iters: int = 0):
     """返回零件的碰撞基础多边形（未缩放、未旋转、局部坐标）。
     优先用参数化主体轮廓缓冲；否则用 contour 直接构建。
+    smooth_iters 与渲染端一致，保证锚点(bbox 中心)对齐。
     """
     if part.subject_outline:
-        poly = border.dieline_polygon(part.subject_outline, offset_px)
+        poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters)
     else:
         poly = shapely.geometry.Polygon(part.contour)
 
@@ -43,9 +44,10 @@ def _footprint(base_poly, scale: float, angle_deg: float):
 
 
 def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
-           page_w: int, page_h: int, grid_step: int):
+           page_w: int, page_h: int, grid_step: int, progress_cb=None,
+           smooth_iters: int = 0):
     """执行一轮 BLF 排版，原地更新每个 part 的 cx/cy/rotation/x/y。
-    返回成功放置的零件数量。
+    返回成功放置的零件数量。progress_cb(done, total) 每处理完一个零件回调一次。
 
     性能要点：board 判定与碰撞预筛全用 AABB 算术(纸框为矩形,bbox 在框内⟺几何在框内),
     仅当候选 AABB 与已放置 AABB 真正相交时才做一次精确 prepared.intersects;
@@ -53,14 +55,14 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
     """
     # 按旋转 0° 时的 footprint 面积降序排列，大零件优先
     def _area_key(part):
-        return _footprint(_base_poly(part, offset_px), part.scale, 0)[0].area
+        return _footprint(_base_poly(part, offset_px, smooth_iters), part.scale, 0)[0].area
 
     items = sorted(parts, key=_area_key, reverse=True)
     placed = []  # [(prepared_poly, (minx,miny,maxx,maxy))]
     placed_count = 0
 
-    for part in items:
-        base = _base_poly(part, offset_px)
+    for idx, part in enumerate(items):
+        base = _base_poly(part, offset_px, smooth_iters)
 
         # 候选角度：锁角件只用当前角度；自由件按均匀步数试所有角度
         if part.locked:
@@ -128,11 +130,15 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
             part.x = -1
             part.y = -1
 
+        if progress_cb is not None:
+            progress_cb(idx + 1, len(items))
+
     return placed_count
 
 
 def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
-         uniform_scale=False, grid_step=40, page_px=None):
+         uniform_scale=False, grid_step=40, page_px=None, progress_cb=None,
+         smooth_iters=0):
     """旋转感知 BLF 排版，原地更新每个 part 的 cx/cy/rotation/scale/x/y。
 
     参数：
@@ -143,6 +149,8 @@ def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
         uniform_scale: True 时整体等比缩放以最大化利用率，False 时按各自 scale 排版。
         grid_step: 网格扫描步长（像素）。
         page_px: (page_w, page_h) 元组（像素），None 用 A4。
+        progress_cb: 可选 progress_cb(done, total)，每放置/放弃一个零件回调一次
+            （uniform_scale 重试时进度会从头重新计）。
 
     放不下的零件设 cx=cy=x=y=-1，放下的设锚点（未旋转包围盒中心）cx/cy 与包围盒左上 x/y。
     """
@@ -164,7 +172,7 @@ def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
     if uniform_scale:
         # 估算使总面积约占页面 72% 的全局缩放系数
         total_area = sum(
-            max(_footprint(_base_poly(p, offset_px), p.scale, 0)[0].area, 1.0)
+            max(_footprint(_base_poly(p, offset_px, smooth_iters), p.scale, 0)[0].area, 1.0)
             for p in parts
         )
         page_area = page_w * page_h
@@ -181,7 +189,8 @@ def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
         # 尝试排版，失败则缩减 0.85，最多重试 2 次
         for attempt in range(3):
             placed_count = _place(parts, offset_px, spacing_px, angle_steps,
-                                  page_w, page_h, grid_step)
+                                  page_w, page_h, grid_step, progress_cb=progress_cb,
+                                  smooth_iters=smooth_iters)
             if placed_count == len(parts):
                 break  # 全部放下
             if attempt < 2:
@@ -189,12 +198,13 @@ def nest(parts, offset_mm=None, spacing_mm=None, angle_steps=8,
                 for p in parts:
                     p.scale *= 0.85
     else:
-        _place(parts, offset_px, spacing_px, angle_steps, page_w, page_h, grid_step)
+        _place(parts, offset_px, spacing_px, angle_steps, page_w, page_h, grid_step,
+               progress_cb=progress_cb, smooth_iters=smooth_iters)
 
     return parts
 
 
-def part_polygon(part, offset_mm=None):
+def part_polygon(part, offset_mm=None, smooth_iters=0):
     """返回零件在页面坐标中的碰撞多边形（已按 cx/cy/angle/scale 定位）。
     用于测试和可视化。
     """
@@ -202,7 +212,7 @@ def part_polygon(part, offset_mm=None):
         offset_mm = g.OFFSET_MM
     offset_px = g.mm_to_px(offset_mm)
 
-    base = _base_poly(part, offset_px)
+    base = _base_poly(part, offset_px, smooth_iters)
     fp, anchor = _footprint(base, part.scale, part.rotation)
 
     # 若零件已放置，将锚点（未旋转包围盒中心）对齐到 (cx, cy)

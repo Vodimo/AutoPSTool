@@ -18,12 +18,17 @@ let pageHpx = 297 * PIXEL_RATIO;   // 2970
 const canvas = new fabric.Canvas('c', {
   selection: true,
   backgroundColor: '#e2e8f0',   // 中性灰背景，白色纸框更突出
+  fireMiddleClick: true,        // fabric 默认不派发中键事件，开启后中键拖拽平移才生效
 });
+// 阻止中键默认行为（浏览器自动滚动圆点），否则平移被劫持
+canvas.upperCanvasEl.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+canvas.upperCanvasEl.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
 const statusEl = document.getElementById('status');
 const setStatus = (t) => statusEl.textContent = t;
 
 let borderPx = 20;                       // 当前白边(px，物理像素)，默认 2mm
+let smoothIters = 0;                     // 描边平滑迭代数(Chaikin，0=不平滑)，与后端 /api/set_smooth 同步
 const objById = new Map();
 const partData = new Map();              // id -> 后端返回的零件数据（只增不删，供 undo 重建）
 const imgElById = new Map();             // id -> 已加载的 HTMLImageElement（只增不删，供 undo 重建）
@@ -115,9 +120,9 @@ function fitView() {
   const panX = cw / 2 - bboxCx;
   const panY = ch / 2 - bboxCy;
 
-  canvas.setZoom(zoom);
-  canvas.viewportTransform[4] = panX;
-  canvas.viewportTransform[5] = panY;
+  // 用 setViewportTransform 整体设置：会重算所有对象的命中坐标(oCoords)。
+  // 直接改 viewportTransform 数组会使命中检测用旧坐标 → 点 A 选中 B
+  canvas.setViewportTransform([zoom, 0, 0, zoom, panX, panY]);
   canvas.requestRenderAll();
 }
 
@@ -177,9 +182,11 @@ canvas.on('mouse:move', function (opt) {
   const dx = e.clientX - panStart.x;
   const dy = e.clientY - panStart.y;
   panStart = { x: e.clientX, y: e.clientY };
-  const vpt = canvas.viewportTransform;
+  // setViewportTransform 会重算对象命中坐标，直接改数组会导致平移后点选错位
+  const vpt = canvas.viewportTransform.slice();
   vpt[4] += dx;
   vpt[5] += dy;
+  canvas.setViewportTransform(vpt);
   canvas.requestRenderAll();
   opt.e.preventDefault();
 });
@@ -232,6 +239,24 @@ function bufferOutline(polyline, offsetPx) {
   return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
 }
 
+// —— Chaikin 切角平滑（与后端 border.smooth_ring 同算法，保证碰撞/渲染同形）——
+function chaikinSmooth(ring, iterations) {
+  let pts = ring;
+  for (let k = 0; k < iterations; k++) {
+    if (pts.length < 3) break;
+    const out = [];
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = pts[i];
+      const [x1, y1] = pts[(i + 1) % n];
+      out.push([0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1]);
+      out.push([0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1]);
+    }
+    pts = out;
+  }
+  return pts;
+}
+
 // —— 同步由「已缓存图片元素 + 当前 borderPx」构建一个 fabric.Group（物理坐标）——
 // 主体图 scaleX/scaleY=1（物理），多边形点用物理 px
 function buildGroupSync(p) {
@@ -241,8 +266,9 @@ function buildGroupSync(p) {
     // 使用后端下发的细采样最外环(subject_poly)
     const outline = p.subject_poly && p.subject_poly.length >= 3
       ? p.subject_poly : parseDToPolyline(p.subject_outline);
-    const die = bufferOutline(outline, borderPx);   // 物理像素
+    let die = bufferOutline(outline, borderPx);   // 物理像素
     if (die.length < 3) return null;
+    if (smoothIters > 0) die = chaikinSmooth(die, smoothIters);
     const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
     const miny = die.reduce((a, q) => Math.min(a, q[1]), Infinity);
     // 多边形点相对于 group 原点（物理坐标，scaleX/Y=1）
@@ -255,7 +281,11 @@ function buildGroupSync(p) {
       scaleX: 1, scaleY: 1,
       selectable: false, evented: false,
     });
-    const grp = new fabric.Group([white, img, dieLine], { partId: p.id, cornerSize: 8, transparentCorners: false });
+    const grp = new fabric.Group([white, img, dieLine], {
+      partId: p.id, cornerSize: 8, transparentCorners: false,
+      // 逐像素命中：主体图带 60px 透明边距，默认矩形命中会点空白误选零件
+      perPixelTargetFind: true,
+    });
     // 组包围盒左上 → 主体帧原点的偏移（切割坐标换算用）：
     // 白边小于主体边距时组包围盒=主体图（偏移 0）；白边更大时=刀模包围盒（偏移=minx-0.5，含描边半宽）
     grp.frameOffX = Math.min(0, minx - 0.5);
@@ -271,7 +301,10 @@ function buildGroupSync(p) {
     const ring = parseDToPolyline(p.dieline_path).map(([x, y]) => ({ x, y }));
     if (ring.length >= 2) children.push(new fabric.Polygon(ring, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false }));
   }
-  return new fabric.Group(children, { partId: p.id, cornerSize: 8, transparentCorners: false });
+  return new fabric.Group(children, {
+    partId: p.id, cornerSize: 8, transparentCorners: false,
+    perPixelTargetFind: true,
+  });
 }
 
 // 加载零件图片元素（每个零件只一次），存入 imgElById
@@ -369,6 +402,7 @@ function snapshot() {
     tf,
     g: {
       borderPx,
+      smoothIters,
       pageWmm: pageWpx / PIXEL_RATIO,
       pageHmm: pageHpx / PIXEL_RATIO,
       bleedMm: getBleedMm(),
@@ -389,6 +423,14 @@ async function applySnapshot(s) {
   canvas.discardActiveObject();
   // 1. 全局参数
   borderPx = s.g.borderPx;
+  // 平滑（旧快照可能无此字段，回退 0）
+  const snapSmooth = s.g.smoothIters || 0;
+  if (snapSmooth !== smoothIters) {
+    smoothIters = snapSmooth;
+    document.getElementById('smooth-range').value = snapSmooth;
+    document.getElementById('smooth-label').textContent = snapSmooth;
+    api('/api/set_smooth', { smooth_iters: snapSmooth }).catch(() => {});
+  }
   // 纸张尺寸（如有变化）
   if (pageWpx / PIXEL_RATIO !== s.g.pageWmm || pageHpx / PIXEL_RATIO !== s.g.pageHmm) {
     applyPageSize(s.g.pageWmm, s.g.pageHmm);
@@ -609,6 +651,22 @@ function commitBorder() {
 }
 rng.onchange  = commitBorder;
 num.onchange  = commitBorder;
+
+// —— 描边平滑滑块（0=不平滑；实时重建，松手同步后端+推快照）——
+const smoothRng = document.getElementById('smooth-range');
+const smoothLbl = document.getElementById('smooth-label');
+function setSmoothIters(k) {
+  canvas.discardActiveObject();
+  smoothIters = k;
+  smoothLbl.textContent = k;
+  for (const id of objById.keys()) { if (partData.get(id).kind === 'parametric') rebuildPart(id); }
+  canvas.requestRenderAll();
+}
+smoothRng.oninput = () => setSmoothIters(parseInt(smoothRng.value, 10) || 0);
+smoothRng.onchange = () => {
+  api('/api/set_smooth', { smooth_iters: smoothIters }).catch(() => {});
+  pushSnapshot();
+};
 
 // —— 纸张尺寸控件 ——
 const pagePreset = document.getElementById('page-preset');
@@ -876,10 +934,22 @@ document.getElementById('btn-tidy').onclick = async () => {
   const uniform_scale = document.getElementById('nest-uniform').checked;
 
   setStatus('排版中…');
-  showProgress(0.4);
+  showProgress(0.02);
   try {
-    const r = await api('/api/nest', { items, spacing_mm, angle_steps, uniform_scale });
-    const { positions } = await r.json();
+    // 异步模式：后台线程排版，轮询 /api/nest_progress 获得逐零件真实进度
+    await api('/api/nest', { items, spacing_mm, angle_steps, uniform_scale, async: true });
+    const positions = await new Promise((resolve, reject) => {
+      const timer = setInterval(async () => {
+        try {
+          const pr = await fetch('/api/nest_progress');
+          if (!pr.ok) throw new Error(await pr.text());
+          const s = await pr.json();
+          if (s.error) { clearInterval(timer); reject(new Error(s.error)); return; }
+          showProgress(Math.max(0.02, s.progress));
+          if (!s.running && s.positions) { clearInterval(timer); resolve(s.positions); }
+        } catch (e) { clearInterval(timer); reject(e); }
+      }, 200);
+    });
     for (const pos of positions) {
       const o = objById.get(pos.id);
       // cx<0 表示该零件未能放置，跳过保留原位
@@ -1039,6 +1109,7 @@ canvas.on('mouse:down', function (opt) {
   cutStart = { x: ptr.x, y: ptr.y };
 
   // 创建预览线（洋红虚线）
+  // objectCaching 必须关闭：缓存位图不随 x2/y2 更新失效，拖动时线不可见
   cutLine = new fabric.Line(
     [cutStart.x, cutStart.y, cutStart.x, cutStart.y],
     {
@@ -1048,9 +1119,11 @@ canvas.on('mouse:down', function (opt) {
       selectable: false,
       evented: false,
       excludeFromExport: true,
+      objectCaching: false,
     }
   );
   canvas.add(cutLine);
+  canvas.bringToFront(cutLine);
   canvas.requestRenderAll();
 });
 
@@ -1059,6 +1132,7 @@ canvas.on('mouse:move', function (opt) {
   if (!cutMode || !cutDragging || !cutLine || isPanning) return;
   const ptr = canvas.getPointer(opt.e);
   cutLine.set({ x2: ptr.x, y2: ptr.y });
+  cutLine.setCoords();
   canvas.requestRenderAll();
 });
 
@@ -1213,12 +1287,15 @@ const brushSizeLbl = document.getElementById('brush-size-label');
 brushSizeEl.oninput = () => { brushSizeLbl.textContent = brushSizeEl.value; };
 
 // 修补模式状态变量
+// 交互流程：可多笔累积涂抹（同一零件），Enter 一次性应用，Esc 取消笔迹（再 Esc 退出模式）
 let brushMode     = false;   // 是否处于修补画笔模式
 let brushPainting = false;   // 当前是否正在涂抹（mouse down 中）
-let brushTarget   = null;    // 正在涂抹的 group 对象
-let brushCanvas   = null;    // 离屏 canvas（subject_image 像素尺寸）
+let brushTarget   = null;    // 累积笔迹的目标零件（第一笔锁定）
+let brushCanvas   = null;    // 离屏 canvas（subject_image 像素尺寸，累积多笔）
 let brushCtx      = null;    // 对应 2D 上下文
-let brushOverlays = [];      // 临时叠加的 fabric.Circle 预览对象
+let brushOverlays = [];      // 已完成笔画的预览折线（fabric.Polyline）
+let brushCurPts   = [];      // 当前笔画的场景坐标点
+let brushCurLine  = null;    // 当前笔画的临时折线对象
 
 // 进入修补画笔模式
 function enterBrushMode() {
@@ -1232,7 +1309,7 @@ function enterBrushMode() {
   });
   // 禁止框选
   canvas.selection = false;
-  setStatus('修补：选中一个零件，在其上涂抹（加/擦）');
+  setStatus('修补：在零件上涂抹（可多笔），Enter 应用 / Esc 取消');
 }
 
 // 退出修补画笔模式
@@ -1244,19 +1321,20 @@ function exitBrushMode() {
     if (o.partId) { o.lockMovementX = false; o.lockMovementY = false; }
   });
   canvas.selection = true;
-  // 清除状态
+  clearBrushStrokes();
+  setStatus('已退出修补模式');
+}
+
+// 清除累积笔迹：预览折线 + 离屏画布 + 目标锁定
+function clearBrushStrokes() {
+  for (const o of brushOverlays) canvas.remove(o);
+  brushOverlays = [];
+  if (brushCurLine) { canvas.remove(brushCurLine); brushCurLine = null; }
+  brushCurPts   = [];
   brushPainting = false;
   brushTarget   = null;
   brushCanvas   = null;
   brushCtx      = null;
-  clearBrushOverlays();
-  setStatus('已退出修补模式');
-}
-
-// 清除画布上的笔迹预览圆点
-function clearBrushOverlays() {
-  for (const o of brushOverlays) canvas.remove(o);
-  brushOverlays = [];
   canvas.requestRenderAll();
 }
 
@@ -1276,10 +1354,20 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Esc 退出修补模式
+// Enter 应用累积笔迹 / Esc 取消笔迹（无笔迹时 Esc 退出模式）
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && brushMode && !brushPainting) {
-    exitBrushMode();
+  if (!brushMode) return;
+  if (e.key === 'Enter' && brushTarget && !brushPainting) {
+    applyBrushStrokes();
+    return;
+  }
+  if (e.key === 'Escape' && !brushPainting) {
+    if (brushTarget) {
+      clearBrushStrokes();
+      setStatus('已取消笔迹');
+    } else {
+      exitBrushMode();
+    }
   }
 });
 
@@ -1312,43 +1400,59 @@ function sceneToSubjectPx(group, sceneX, sceneY) {
   };
 }
 
-// 在离屏 canvas 上画一个白色圆点（笔迹记录）
-function paintDot(px, py) {
+// 在离屏 canvas 上画一个白色圆点（笔迹记录，主体帧像素坐标）
+function paintDot(px, py, r) {
   if (!brushCtx) return;
-  const r = parseInt(brushSizeEl.value, 10) / 2;
   brushCtx.beginPath();
   brushCtx.arc(px, py, r, 0, Math.PI * 2);
   brushCtx.fillStyle = '#ffffff';
   brushCtx.fill();
 }
 
-// 在主画布上添加半透明预览圆（green/red）
-function addOverlayDot(sceneX, sceneY, group) {
-  const mode   = document.getElementById('brush-mode').value;
-  const color  = mode === 'add' ? 'rgba(0,200,0,0.4)' : 'rgba(220,0,0,0.4)';
-  const radius = (parseInt(brushSizeEl.value, 10) / 2) * (group.scaleX || 1);
-  const dot = new fabric.Circle({
-    left: sceneX - radius,
-    top:  sceneY - radius,
-    radius,
-    fill: color,
+// 记录一个笔迹点：写入离屏画布 + 更新当前笔画预览折线
+function brushAddPoint(ptr) {
+  const sp = sceneToSubjectPx(brushTarget, ptr.x, ptr.y);
+  if (sp) {
+    // 主体帧内笔径 = 物理笔径 / 组缩放（组被放大时帧内笔迹相应变细，屏上大小一致）
+    const gScale = brushTarget.scaleX || 1;
+    paintDot(sp.x, sp.y, (parseInt(brushSizeEl.value, 10) / 2) / gScale);
+  }
+  brushCurPts.push({ x: ptr.x, y: ptr.y });
+  rebuildCurStrokeLine();
+}
+
+// 重建当前笔画的预览折线（单对象，替代逐点 Circle 的性能问题）
+function rebuildCurStrokeLine() {
+  if (brushCurLine) canvas.remove(brushCurLine);
+  const mode  = document.getElementById('brush-mode').value;
+  const color = mode === 'add' ? 'rgba(0,200,0,0.45)' : 'rgba(220,0,0,0.45)';
+  // 单点时补一个近点，保证圆头帽画出圆点
+  const pts = brushCurPts.length === 1
+    ? [brushCurPts[0], { x: brushCurPts[0].x + 0.1, y: brushCurPts[0].y }]
+    : brushCurPts;
+  brushCurLine = new fabric.Polyline(pts, {
+    stroke: color,
+    strokeWidth: parseInt(brushSizeEl.value, 10),
+    strokeLineCap: 'round',
+    strokeLineJoin: 'round',
+    fill: '',
     selectable: false,
     evented: false,
     excludeFromExport: true,
     objectCaching: false,
   });
-  canvas.add(dot);
-  brushOverlays.push(dot);
+  canvas.add(brushCurLine);
+  canvas.requestRenderAll();
 }
 
-// mouse:down — 修补画笔
+// mouse:down — 修补画笔：开始一笔（首笔锁定目标零件并建离屏画布）
 canvas.on('mouse:down', function (opt) {
   if (!brushMode || isPanning) return;
 
   const target = opt.target;
   // 必须命中一个零件 group（参数化）
   if (!target || !target.partId) {
-    setStatus('修补：请先点选一个零件，再涂抹');
+    setStatus('修补：请在零件主体上涂抹');
     return;
   }
   const pd = partData.get(target.partId);
@@ -1361,63 +1465,57 @@ canvas.on('mouse:down', function (opt) {
     setStatus('修补：请先按 L 将零件角度归零再修补');
     return;
   }
-
-  // 初始化离屏 canvas（subject_image 原生像素尺寸）
-  brushTarget = target;
-  brushCanvas = document.createElement('canvas');
-  brushCanvas.width  = pd.w;
-  brushCanvas.height = pd.h;
-  brushCtx = brushCanvas.getContext('2d');
-  brushPainting = true;
-
-  const ptr = canvas.getPointer(opt.e);
-  const sp  = sceneToSubjectPx(target, ptr.x, ptr.y);
-  if (sp) {
-    paintDot(sp.x, sp.y);
-    addOverlayDot(ptr.x, ptr.y, target);
-    canvas.requestRenderAll();
-  }
-});
-
-// mouse:move — 修补画笔
-canvas.on('mouse:move', function (opt) {
-  if (!brushMode || !brushPainting || isPanning) return;
-  const ptr = canvas.getPointer(opt.e);
-  const sp  = sceneToSubjectPx(brushTarget, ptr.x, ptr.y);
-  if (sp) {
-    paintDot(sp.x, sp.y);
-    addOverlayDot(ptr.x, ptr.y, brushTarget);
-    canvas.requestRenderAll();
-  }
-});
-
-// mouse:up — 修补画笔：提交笔迹到后端，替换零件
-canvas.on('mouse:up', async function (opt) {
-  if (!brushMode || !brushPainting) return;
-  brushPainting = false;
-
-  if (!brushCanvas || !brushTarget) {
-    clearBrushOverlays();
+  // 已有未应用笔迹时只允许继续涂同一零件
+  if (brushTarget && target !== brushTarget) {
+    setStatus('已有未应用的笔迹：先按 Enter 应用或 Esc 取消，再修补其他零件');
     return;
   }
 
+  if (!brushTarget) {
+    // 首笔：锁定目标并初始化离屏 canvas（subject_image 原生像素尺寸）
+    brushTarget = target;
+    brushCanvas = document.createElement('canvas');
+    brushCanvas.width  = pd.w;
+    brushCanvas.height = pd.h;
+    brushCtx = brushCanvas.getContext('2d');
+  }
+  brushPainting = true;
+  brushCurPts = [];
+  brushAddPoint(canvas.getPointer(opt.e));
+});
+
+// mouse:move — 修补画笔：延续当前笔画
+canvas.on('mouse:move', function (opt) {
+  if (!brushMode || !brushPainting || isPanning) return;
+  brushAddPoint(canvas.getPointer(opt.e));
+});
+
+// mouse:up — 修补画笔：结束当前笔画（不提交；Enter 统一应用）
+canvas.on('mouse:up', function () {
+  if (!brushMode || !brushPainting) return;
+  brushPainting = false;
+  if (brushCurLine) {
+    brushOverlays.push(brushCurLine);
+    brushCurLine = null;
+  }
+  brushCurPts = [];
+  setStatus('修补：可继续涂抹，Enter 应用 / Esc 取消');
+});
+
+// 应用累积笔迹：一次性提交后端，替换零件（内容原位对齐）
+async function applyBrushStrokes() {
+  if (!brushTarget || !brushCanvas) return;
   const group  = brushTarget;
   const partId = group.partId;
-  brushTarget  = null;
-
-  // 记录原始位置（替换后首件放回原位）
   const origLeft = group.left;
   const origTop  = group.top;
+  const gScale = group.scaleX || 1;
 
   // 导出笔迹为 PNG data-url（白色笔迹=涂抹区）
   const stroke_b64 = brushCanvas.toDataURL('image/png');
-  brushCanvas = null;
-  brushCtx    = null;
-
-  // 清除预览圆点
-  clearBrushOverlays();
-
   const mode = document.getElementById('brush-mode').value;
+  clearBrushStrokes();
+
   setStatus('修补处理中…');
   showProgress(0.5);
   try {
@@ -1437,11 +1535,17 @@ canvas.on('mouse:up', async function (opt) {
       return;
     }
 
-    // addPart 每个返回零件：首件放原位，后续向右各偏移 40px
-    for (let i = 0; i < parts.length; i++) {
-      const px = origLeft + i * 40;
-      const py = origTop;
-      await addPart(parts[i], px, py);
+    // 按后端帧偏移原位对齐：新主体帧原点在旧主体帧的 (frame_dx, frame_dy)
+    for (const piece of parts) {
+      const px = origLeft + (piece.frame_dx || 0) * gScale;
+      const py = origTop  + (piece.frame_dy || 0) * gScale;
+      await addPart(piece, px, py);
+      // 继承原零件缩放（绕左上角缩放，left/top 不动，对齐关系保持）
+      const po = objById.get(piece.id);
+      if (po && gScale !== 1) {
+        po.set({ scaleX: gScale, scaleY: gScale });
+        po.setCoords();
+      }
     }
 
     if (pageRect) canvas.sendToBack(pageRect);
@@ -1453,7 +1557,7 @@ canvas.on('mouse:up', async function (opt) {
   } finally {
     hideProgress();
   }
-});
+}
 
 // 初始 fit-view（仅纸框）并推基线快照（使最早的导入也可撤销）
 fitView();
