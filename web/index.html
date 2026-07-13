@@ -11,67 +11,89 @@
 <body>
   <header>
     <h1>AutoPSTool</h1>
-    <input type="file" id="file" accept="image/png,image/jpeg" style="display:none" multiple>
-    <button id="btn-import">导入图片</button>
-    <label style="display:flex;align-items:center;gap:6px;font-size:13px">白边
-      <input type="range" id="border-range" min="0" max="100" step="1" value="20">
-      <input type="number" id="border-num" min="0" step="0.1" value="2" style="width:56px">
+
+    <div class="tool-group">
+      <span class="group-label">文件</span>
+      <input type="file" id="file" accept="image/png,image/jpeg" style="display:none" multiple>
+      <button id="btn-import" title="导入图片，可一次多选">📥 导入</button>
+      <button id="btn-export" title="导出含洋红刀模线的印刷 PNG（纸框外零件不导出）">📤 导出</button>
+    </div>
+
+    <div class="tool-group">
+      <span class="group-label">白边</span>
+      <input type="range" id="border-range" min="0" max="100" step="1" value="20" title="白边宽度">
+      <input type="number" id="border-num" min="0" step="0.1" value="2">
       <select id="border-unit"><option value="mm">mm</option><option value="px">px</option></select>
-    </label>
-    <label style="display:flex;align-items:center;gap:4px;font-size:13px">平滑
-      <input type="range" id="smooth-range" min="0" max="4" step="1" value="0" style="width:64px">
-      <span id="smooth-label" style="width:12px;text-align:right">0</span>
-    </label>
-    <label style="display:flex;align-items:center;gap:6px;font-size:13px">纸张
-      <select id="page-preset">
+      <span class="group-label">平滑</span>
+      <input type="range" id="smooth-range" min="0" max="4" step="1" value="0" title="描边平滑程度，0=不平滑">
+      <span id="smooth-label" class="value-label">0</span>
+    </div>
+
+    <div class="tool-group">
+      <span class="group-label">纸张</span>
+      <select id="page-preset" title="纸张预设">
         <option value="A4">A4</option>
         <option value="A3">A3</option>
         <option value="A5">A5</option>
         <option value="Letter">Letter</option>
         <option value="custom">自定义</option>
       </select>
-      <input type="number" id="page-w" value="210" min="1" style="width:56px">×
-      <input type="number" id="page-h" value="297" min="1" style="width:56px">
+      <input type="number" id="page-w" value="210" min="1">×
+      <input type="number" id="page-h" value="297" min="1">
       <select id="page-unit"><option value="mm">mm</option><option value="px">px</option></select>
-    </label>
-    <label style="display:flex;align-items:center;gap:6px;font-size:13px">出血
-      <input type="number" id="bleed-num" min="0" step="0.1" value="1.5" style="width:52px">
-      <select id="bleed-unit"><option value="mm">mm</option><option value="px">px</option></select>
-    </label>
-    <button id="btn-brush">修补</button>
-    <select id="brush-mode" style="font-size:13px"><option value="add">加</option><option value="erase">擦</option></select>
-    <label style="display:flex;align-items:center;gap:4px;font-size:13px">笔刷
-      <input type="range" id="brush-size" min="4" max="120" value="24" style="width:72px">
-      <span id="brush-size-label" style="width:28px;text-align:right">24</span>px
-    </label>
-    <button id="btn-cut">切割模式</button>
-    <label style="display:flex;align-items:center;gap:6px;font-size:13px">排版精度
-      <select id="nest-precision" style="font-size:13px">
-        <option value="1">快</option>
-        <option value="4">标准</option>
-        <option value="8" selected>精细</option>
-        <option value="24">极致</option>
+    </div>
+
+    <div class="tool-group">
+      <span class="group-label">工具</span>
+      <button id="btn-cut" title="切割模式（C）：点选目标零件，拖直线，Enter 确认 / Esc 取消">✂️ 切割</button>
+      <label title="切口两侧的重叠出血量">出血
+        <input type="number" id="bleed-num" min="0" step="0.1" value="1.5">
+        <select id="bleed-unit"><option value="mm">mm</option><option value="px">px</option></select>
+      </label>
+      <button id="btn-brush" title="修补画笔（B）：在零件上涂抹修正抠图，Enter 应用 / Esc 取消">🖌️ 修补</button>
+      <select id="brush-mode" title="加=补涂主体，擦=擦除主体">
+        <option value="add">加</option><option value="erase">擦</option>
       </select>
-    </label>
-    <label style="display:flex;align-items:center;gap:6px;font-size:13px">间距
-      <input type="number" id="nest-spacing" min="0" step="0.5" value="2" style="width:48px">
-      <select id="nest-spacing-unit" style="font-size:13px"><option value="mm">mm</option><option value="px">px</option></select>
-    </label>
-    <label style="display:flex;align-items:center;gap:4px;font-size:13px">
-      <input type="checkbox" id="nest-uniform">统一缩放
-    </label>
-    <button id="btn-tidy">整理排版</button>
-    <button id="btn-fit">适应视图</button>
-    <button id="btn-delete">删除选中</button>
-    <button id="btn-export">导出 PNG</button>
-    <span id="status">就绪</span>
+      <input type="range" id="brush-size" min="4" max="120" value="24" title="笔刷大小">
+      <span class="value-label"><span id="brush-size-label">24</span>px</span>
+    </div>
+
+    <div class="tool-group">
+      <span class="group-label">排版</span>
+      <label title="试验的旋转角度数：越高越紧凑，也越慢">精度
+        <input type="range" id="nest-precision" min="1" max="24" step="1" value="8">
+        <span id="nest-precision-label" class="value-label">8</span>
+      </label>
+      <label title="零件之间的最小安全间距">间距
+        <input type="number" id="nest-spacing" min="0" step="0.5" value="2">
+        <select id="nest-spacing-unit"><option value="mm">mm</option><option value="px">px</option></select>
+      </label>
+      <label title="所有零件按同一比例整体缩放，最大化纸张利用率">
+        <input type="checkbox" id="nest-uniform">统一缩放
+      </label>
+      <button id="btn-tidy" title="自动紧凑排版：锁角零件保持角度，自由零件自动旋转">🧩 整理排版</button>
+    </div>
+
+    <div class="tool-group">
+      <button id="btn-fit" title="缩放视图使纸框和所有零件可见">⤢ 适应视图</button>
+      <button id="btn-delete" title="删除选中零件（支持多选，可撤销）">🗑️ 删除</button>
+    </div>
   </header>
-  <div id="progress" style="display:none;height:3px;background:#e2e8f0">
-    <div id="progress-bar" style="height:100%;width:30%;background:#ec4899;transition:width .2s"></div>
-  </div>
+
+  <div id="progress" style="display:none"><div id="progress-bar"></div></div>
+  <div id="mode-banner" style="display:none"></div>
+
   <div id="wrap">
     <canvas id="c"></canvas>
+    <div id="lock-badge" style="display:none" title="点击解除锁角，角度归零">📌 角度已锁 · 点击解除</div>
   </div>
+
+  <footer id="statusbar">
+    <span id="status">就绪</span>
+    <span class="hint">滚轮缩放 · 空格/中键平移 · Ctrl+Z 撤销 · L 解锁角</span>
+    <span id="zoom-label">100%</span>
+  </footer>
+
   <script src="/app.js"></script>
 </body>
 </html>
