@@ -256,6 +256,37 @@ function bufferOutline(polyline, offsetPx) {
   return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
 }
 
+// —— 切割半平面裁剪（与后端 border.halfplane_polygon 同几何）——
+// plane=[x1,y1,x2,y2]，保留侧 = 法线 n=(-dy,dx)/L 指向侧；边界向对侧平移 bleedPx（出血越线）
+function clipToHalfplane(ring, plane, bleedPx) {
+  const [x1, y1, x2, y2] = plane;
+  const dx = x2 - x1, dy = y2 - y1;
+  const L = Math.hypot(dx, dy) || 1;
+  const ux = dx / L, uy = dy / L;
+  const nx = -uy, ny = ux;
+  const E = 20000;   // 远大于零件尺寸即可（clipper 整数域安全）
+  const bx1 = x1 - nx * bleedPx, by1 = y1 - ny * bleedPx;
+  const bx2 = x2 - nx * bleedPx, by2 = y2 - ny * bleedPx;
+  const quad = [
+    [bx1 - ux * E, by1 - uy * E],
+    [bx2 + ux * E, by2 + uy * E],
+    [bx2 + ux * E + nx * E, by2 + uy * E + ny * E],
+    [bx1 - ux * E + nx * E, by1 - uy * E + ny * E],
+  ];
+  const SCALE = 100;
+  const toPath = (pts) => pts.map(([x, y]) => ({ X: Math.round(x * SCALE), Y: Math.round(y * SCALE) }));
+  const c = new ClipperLib.Clipper();
+  c.AddPath(toPath(ring), ClipperLib.PolyType.ptSubject, true);
+  c.AddPath(toPath(quad), ClipperLib.PolyType.ptClip, true);
+  const sol = new ClipperLib.Paths();
+  c.Execute(ClipperLib.ClipType.ctIntersection, sol,
+            ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  if (!sol.length) return ring;
+  let best = sol[0], bestA = 0;
+  for (const p of sol) { const a = Math.abs(ClipperLib.Clipper.Area(p)); if (a > bestA) { bestA = a; best = p; } }
+  return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
+}
+
 // —— Chaikin 切角平滑（与后端 border.smooth_ring 同算法，保证碰撞/渲染同形）——
 function chaikinSmooth(ring, iterations) {
   let pts = ring;
@@ -286,6 +317,12 @@ function buildGroupSync(p) {
     let die = bufferOutline(outline, borderPx);   // 物理像素
     if (die.length < 3) return null;
     if (smoothIters > 0) die = chaikinSmooth(die, smoothIters);
+    // 切割块：刀模与各半平面求交（切口平直 + 出血越线；先平滑后裁剪保切口锋利）
+    if (p.cut_planes && p.cut_planes.length) {
+      const bleedPx = getBleedMm() * PIXEL_RATIO;
+      for (const plane of p.cut_planes) die = clipToHalfplane(die, plane, bleedPx);
+      if (die.length < 3) return null;
+    }
     const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
     const miny = die.reduce((a, q) => Math.min(a, q[1]), Infinity);
     // 多边形点相对于 group 原点（物理坐标，scaleX/Y=1）
@@ -350,10 +387,28 @@ async function addPart(p, x, y) {
   canvas.requestRenderAll();
 }
 
-// —— 锁角视觉标记：锁角 = 洋红选中框/手柄，自由 = 默认蓝 ——
+// —— 锁角视觉标记 ——
+// 锁角零件的「刀模描边」常显橙色（不选中也一眼可辨），选中框/手柄同色；自由 = 洋红描边+蓝框
+const DIE_STROKE  = '#FF00FF';   // 常规刀模描边（洋红，与导出一致）
+const LOCK_STROKE = '#F97316';   // 锁角零件刀模描边（橙，仅画布显示，导出仍洋红）
+function updateLockVisual(o) {
+  const locked = !!o.locked;
+  // 组内有描边的 Polygon 即刀模线（参数化第 3 个子对象 / 固定第 2 个）
+  for (const ch of (o._objects || [])) {
+    if (ch.type === 'polygon' && ch.stroke) {
+      ch.set({ stroke: locked ? LOCK_STROKE : DIE_STROKE });
+    }
+  }
+  o.dirty = true;   // 组有缓存位图，需标脏重绘
+  if (locked) {
+    o.set({ borderColor: LOCK_STROKE, cornerColor: LOCK_STROKE });
+  } else {
+    o.set({ borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
+  }
+}
 function markLocked(o) {
   o.locked = true;
-  o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+  updateLockVisual(o);
   canvas.requestRenderAll();
   pushSnapshot();
 }
@@ -361,7 +416,8 @@ function markFree(o) {
   o.locked = false;
   // 绕中心归零：fabric set angle 绕原点（左上）旋转，直接归零零件会跳位
   const c = o.getCenterPoint();
-  o.set({ angle: 0, borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
+  o.set({ angle: 0 });
+  updateLockVisual(o);
   o.setPositionByOrigin(c, 'center', 'center');
   o.setCoords();
   pushSnapshot();
@@ -378,8 +434,9 @@ lockBadge.onclick = () => {
   }
   lockBadge.style.display = 'none';
 };
-// 每帧渲染后更新标签位置（跟随选中对象与视口缩放/平移）；顺带刷新缩放百分比
+// 每帧渲染后更新标签位置（跟随选中对象与视口缩放/平移）；顺带刷新缩放百分比与切割确认条
 const zoomLabel = document.getElementById('zoom-label');
+const cutBar = document.getElementById('cut-bar');
 canvas.on('after:render', () => {
   zoomLabel.textContent = Math.round(canvas.getZoom() * 100) + '%';
   const o = canvas.getActiveObject();
@@ -390,6 +447,15 @@ canvas.on('after:render', () => {
     lockBadge.style.top  = Math.round(Math.max(2, br.top - 30)) + 'px';
   } else {
     lockBadge.style.display = 'none';
+  }
+  // 切割确认条跟随切割线
+  if (cutPending && cutLine) {
+    const br = cutLine.getBoundingRect();
+    cutBar.style.display = 'flex';
+    cutBar.style.left = Math.round(br.left + br.width / 2 - cutBar.offsetWidth / 2) + 'px';
+    cutBar.style.top  = Math.round(Math.max(2, br.top - 40)) + 'px';
+  } else {
+    cutBar.style.display = 'none';
   }
 });
 
@@ -408,10 +474,7 @@ function rebuildPart(id) {
   grp.locked = old.locked;
   grp.lockMovementX = old.lockMovementX;
   grp.lockMovementY = old.lockMovementY;
-  if (grp.locked) {
-    // 内联设置锁角标记，不触发 pushSnapshot（rebuildPart 由 commitBorder 调用）
-    grp.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
-  }
+  updateLockVisual(grp);   // 不触发 pushSnapshot（rebuildPart 由 commitBorder 调用）
   canvas.remove(old);
   objById.set(id, grp);
   canvas.add(grp);
@@ -538,13 +601,8 @@ async function applySnapshot(s) {
     g.setPositionByOrigin(new fabric.Point(tf.cx, tf.cy), 'center', 'center');
     g.setCoords();
     // 锁角标记（内联设置，不触发 pushSnapshot）
-    if (tf.locked) {
-      g.locked = true;
-      g.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
-    } else {
-      g.locked = false;
-      g.set({ borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
-    }
+    g.locked = !!tf.locked;
+    updateLockVisual(g);
   }
 
   // 4. 白边变化时重建参数化零件多边形
@@ -575,13 +633,8 @@ function rebuildPartInPlace(id, tf) {
     });
     grp.setPositionByOrigin(new fabric.Point(tf.cx, tf.cy), 'center', 'center');
     grp.setCoords();
-    if (tf.locked) {
-      grp.locked = true;
-      grp.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
-    } else {
-      grp.locked = false;
-      grp.set({ borderColor: 'rgba(102,153,255,0.75)', cornerColor: 'rgba(102,153,255,0.5)' });
-    }
+    grp.locked = !!tf.locked;
+    updateLockVisual(grp);
   }
   canvas.remove(old);
   objById.set(id, grp);
@@ -592,7 +645,7 @@ function rebuildPartInPlace(id, tf) {
 // 撤销
 async function undo() {
   if (undoStack.length < 2) return;   // 保留基线快照
-  if (cutPreview) cancelCutPreview(); // 未确认的切割预览随撤销一并取消
+  if (cutDrawing || cutPending) cancelCutLine(); // 未确认的切割线随撤销一并取消
   redoStack.push(undoStack[undoStack.length - 1]);
   undoStack.pop();
   await applySnapshot(undoStack[undoStack.length - 1]);
@@ -602,7 +655,7 @@ async function undo() {
 // 重做
 async function redo() {
   if (!redoStack.length) return;
-  if (cutPreview) cancelCutPreview();
+  if (cutDrawing || cutPending) cancelCutLine();
   const s = redoStack.pop();
   undoStack.push(s);
   await applySnapshot(s);
@@ -815,7 +868,7 @@ canvas.on('object:rotating', (e) => {
   if (o && o.partId) {
     // 内联标记（不触发 pushSnapshot，由 object:modified 统一推）
     o.locked = true;
-    o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+    updateLockVisual(o);
     setStatus('已锁角（按 L 解锁归零）');
   }
 });
@@ -827,7 +880,7 @@ canvas.on('object:modified', (e) => {
   if (o.partId) {
     if (o.angle !== 0 && !o.locked) {
       o.locked = true;
-      o.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+      updateLockVisual(o);
       setStatus('已锁角（按 L 解锁归零）');
     }
     pushSnapshot();
@@ -841,7 +894,7 @@ canvas.on('object:modified', (e) => {
       const d = fabric.util.qrDecompose(m.calcTransformMatrix());
       if (Math.abs(d.angle) > 0.5 && !m.locked) {
         m.locked = true;
-        m.set({ borderColor: '#FF00FF', cornerColor: '#FF00FF' });
+        updateLockVisual(m);
         setStatus('已锁角（按 L 解锁归零）');
       }
     });
@@ -1056,21 +1109,26 @@ function getBleedMm() {
 function onBleedChange() {
   const mm = getBleedMm();
   api('/api/set_bleed', { bleed_mm: mm }).catch(() => {});
+  // 出血影响切割块刀模的越线边界：重建所有带切割平面的零件
+  canvas.discardActiveObject();
+  for (const [id] of objById) {
+    const pd = partData.get(id);
+    if (pd && pd.kind === 'parametric' && pd.cut_planes && pd.cut_planes.length) rebuildPart(id);
+  }
+  canvas.requestRenderAll();
   pushSnapshot();
 }
 bleedNum.onchange  = onBleedChange;
 bleedUnit.onchange = onBleedChange;
 
 // 切割状态变量
+// 交互流程：点选目标零件 → 第一次左键=起点(线随鼠标) → 第二次左键=终点
+// → 线暂存可拖动微调 → 确认条「确认切割/取消」（或 Enter/Esc）→ 切完两块沿切割线两侧分开
 let cutMode = false;            // 是否处于切割模式
 let cutTarget = null;           // 切割目标零件（点选设定，点击其他零件换目标）
-let cutDragging = false;        // 当前是否在拖线中
-let cutLine = null;             // 预览线(fabric.Line)
-let cutStart = null;            // 拖线起点（画布物理坐标）
-
-// cutPreview: 当前未确认的切割预览状态
-// { origId, pieceIds, x1, y1, x2, y2 }
-let cutPreview = null;
+let cutDrawing = false;         // 第一击后：线跟随鼠标
+let cutPending = false;         // 第二击后：线暂存可拖动，等待确认
+let cutLine = null;             // 切割线(fabric.Line, 洋红虚线)
 
 // 切割模式：进入/退出
 function enterCutMode() {
@@ -1078,7 +1136,7 @@ function enterCutMode() {
   if (brushMode) exitBrushMode();
   cutMode = true;
   document.getElementById('btn-cut').classList.add('active');
-  // 禁止所有零件拖拽（保留可选），禁止空白框选（空白处拖动=画切割线）
+  // 禁止所有零件拖拽（保留可选），禁止空白框选（空白处点击=画切割线）
   canvas.getObjects().forEach(o => {
     if (o.partId) {
       o.lockMovementX = true;
@@ -1089,14 +1147,14 @@ function enterCutMode() {
   // 若已有选中的可切零件，直接作为目标
   const a = canvas.getActiveObject();
   if (a && a.partId && !a.locked && Math.abs(a.angle || 0) < 0.5) cutTarget = a;
-  showBanner('✂️ 切割模式：点选目标零件 → 拖一条直线（可从零件外穿过）→ Enter 确认 / Esc 取消');
-  setStatus(cutTarget ? '切割目标已选中，拖一条直线' : '切割：先点选一个目标零件');
+  showBanner('✂️ 切割模式：点选目标零件 → 左键点起点 → 移动 → 再左键点终点 → 拖线微调 → 确认切割');
+  setStatus(cutTarget ? '切割目标已选中，左键点切割线起点' : '切割：先点选一个目标零件');
 }
 
 function exitCutMode() {
   cutMode = false;
   document.getElementById('btn-cut').classList.remove('active');
-  cancelCutPreview();
+  cancelCutLine();
   // 恢复所有零件可拖拽
   canvas.getObjects().forEach(o => {
     if (o.partId) {
@@ -1105,30 +1163,22 @@ function exitCutMode() {
     }
   });
   canvas.selection = true;
-  // 清除拖线
-  if (cutLine) { canvas.remove(cutLine); cutLine = null; }
-  cutDragging = false;
   cutTarget = null;
-  cutStart = null;
   hideBanner();
   canvas.requestRenderAll();
   setStatus('已退出切割模式');
 }
 
-// 取消预览：移除预览件，恢复原件显示（预览件只从 objById 移除，partData/imgElById 保留）
-function cancelCutPreview() {
-  if (!cutPreview) return;
-  // 移除预览件（只从画布和 objById 移除，保留 partData/imgElById）
-  for (const pid of cutPreview.pieceIds) {
-    const o = objById.get(pid);
-    if (o) canvas.remove(o);
-    objById.delete(pid);
-    // partData/imgElById 保留
+// 取消当前切割线（不退出模式）
+function cancelCutLine() {
+  if (cutLine) {
+    canvas.discardActiveObject();
+    canvas.remove(cutLine);
+    cutLine = null;
   }
-  // 恢复原件显示
-  const orig = objById.get(cutPreview.origId);
-  if (orig) { orig.visible = true; }
-  cutPreview = null;
+  cutDrawing = false;
+  cutPending = false;
+  cutBar.style.display = 'none';
   canvas.requestRenderAll();
 }
 
@@ -1148,32 +1198,52 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Enter 确认切割，Esc 取消预览
+// Enter 确认切割 / Esc 取消线（无线时退出模式）
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && cutPreview) {
-    confirmCut();
+  if (!cutMode) return;
+  if (e.key === 'Enter' && cutPending) {
+    doCut();
     return;
   }
   if (e.key === 'Escape') {
-    if (cutPreview) {
-      cancelCutPreview();
-      setStatus('已取消切割');
-    } else if (cutMode) {
+    if (cutDrawing || cutPending) {
+      cancelCutLine();
+      setStatus('已取消切割线');
+    } else {
       exitCutMode();
     }
   }
 });
 
-// 拖线：mouse:down（只在 cutMode 且非平移时）
-// spec 流程：点选零件=设为切割目标（点击其他零件=换目标）；
-// 再次在目标上按下、或在空白处按下（已有目标时）= 开始拖切割线
+// 切割 mouse:down：两击画线
 canvas.on('mouse:down', function (opt) {
   if (!cutMode || isPanning) return;
-  if (cutPreview) return;  // 有未确认预览时不启动新拖线
-
   const target = opt.target;
+
+  // 第二击：定终点，线暂存可拖动 + 显示确认条
+  if (cutDrawing && cutLine) {
+    cutDrawing = false;
+    cutPending = true;
+    cutLine.set({
+      selectable: true, evented: true,
+      hasControls: false, lockRotation: true,
+      hoverCursor: 'move',
+    });
+    cutLine.setCoords();
+    canvas.setActiveObject(cutLine);
+    canvas.requestRenderAll();
+    setStatus('可拖动切割线微调位置，点「确认切割」或 Enter 执行');
+    return;
+  }
+
+  // 待确认状态：点线=fabric 拖动；点其他地方提示
+  if (cutPending) {
+    if (target !== cutLine) setStatus('请先「确认切割」或按 Esc 取消当前切割线');
+    return;
+  }
+
+  // 目标选择/切换（校验锁角/旋转）
   if (target && target.partId && target !== cutTarget) {
-    // 换切割目标（校验锁角/旋转）
     if (target.locked || Math.abs(target.angle || 0) > 0.5) {
       setStatus('该零件已锁角/旋转，请先按 L 归零再切割');
       return;
@@ -1181,28 +1251,25 @@ canvas.on('mouse:down', function (opt) {
     cutTarget = target;
     canvas.setActiveObject(target);
     canvas.requestRenderAll();
-    setStatus('切割目标已选中，在其上或穿过它拖一条直线');
-    return;   // 本次点击仅选目标，不拖线
+    setStatus('切割目标已选中，左键点切割线起点（可在零件外）');
+    return;   // 本次点击仅选目标
   }
   if (!cutTarget) {
     setStatus('切割：先点选一个目标零件');
     return;
   }
-  // 目标可能在选中后被旋转，起拖前再校验一次
+  // 目标可能在选中后被旋转，起笔前再校验一次
   if (cutTarget.locked || Math.abs(cutTarget.angle || 0) > 0.5) {
     setStatus('目标零件已锁角/旋转，请先按 L 归零再切割');
     return;
   }
 
-  // 启动拖线（起点可在零件外，切割线穿过目标即可）
-  cutDragging = true;
+  // 第一击：起点，线开始跟随鼠标
   const ptr = canvas.getPointer(opt.e);
-  cutStart = { x: ptr.x, y: ptr.y };
-
-  // 创建预览线（洋红虚线）
-  // objectCaching 必须关闭：缓存位图不随 x2/y2 更新失效，拖动时线不可见
+  cutDrawing = true;
+  // objectCaching 必须关闭：缓存位图不随 x2/y2 更新失效，移动时线不可见
   cutLine = new fabric.Line(
-    [cutStart.x, cutStart.y, cutStart.x, cutStart.y],
+    [ptr.x, ptr.y, ptr.x, ptr.y],
     {
       stroke: '#FF00FF',
       strokeWidth: 2,
@@ -1216,146 +1283,84 @@ canvas.on('mouse:down', function (opt) {
   canvas.add(cutLine);
   canvas.bringToFront(cutLine);
   canvas.requestRenderAll();
+  setStatus('移动鼠标，再次左键确定切割线终点');
 });
 
-// 拖线：mouse:move
+// 画线阶段：线终点跟随鼠标（无需按住）
 canvas.on('mouse:move', function (opt) {
-  if (!cutMode || !cutDragging || !cutLine || isPanning) return;
+  if (!cutMode || !cutDrawing || !cutLine || isPanning) return;
   const ptr = canvas.getPointer(opt.e);
   cutLine.set({ x2: ptr.x, y2: ptr.y });
   cutLine.setCoords();
   canvas.requestRenderAll();
 });
 
-// 拖线：mouse:up → 发起预览请求
-canvas.on('mouse:up', async function (opt) {
-  if (!cutMode || !cutDragging) return;
-  cutDragging = false;
+// 确认条按钮
+document.getElementById('cut-confirm').onclick = () => doCut();
+document.getElementById('cut-cancel').onclick = () => {
+  cancelCutLine();
+  setStatus('已取消切割线');
+};
 
-  if (!cutLine || !cutTarget || !cutStart) {
-    if (cutLine) { canvas.remove(cutLine); cutLine = null; }
-    return;
-  }
-
-  const ptr = canvas.getPointer(opt.e);
-  const sceneEnd = { x: ptr.x, y: ptr.y };
-
-  // 移除预览线
-  canvas.remove(cutLine);
-  cutLine = null;
-
-  // 端点距离太短则放弃
-  const dx = sceneEnd.x - cutStart.x;
-  const dy = sceneEnd.y - cutStart.y;
-  if (Math.sqrt(dx * dx + dy * dy) < 5) {
-    cutStart = null;
-    canvas.requestRenderAll();
-    setStatus('切割线太短，请重试');
-    return;
-  }
-
+// 执行切割：按暂存切割线切目标零件，切完两块沿切割线法线分居两侧（内容对齐）
+async function doCut() {
+  if (!cutPending || !cutLine || !cutTarget) return;
   const group = cutTarget;
 
-  // 画布坐标 → 零件局部物理坐标
-  // 参数化零件发送「主体帧」坐标（组包围盒左上 + frameOff 偏移）；固定零件 frameOff=0
+  // 线端点场景坐标（线可能被拖动过：经变换矩阵还原）
+  const m = cutLine.calcTransformMatrix();
+  const lp = cutLine.calcLinePoints();
+  const P1 = fabric.util.transformPoint(new fabric.Point(lp.x1, lp.y1), m);
+  const P2 = fabric.util.transformPoint(new fabric.Point(lp.x2, lp.y2), m);
+  cancelCutLine();
+
+  if (Math.hypot(P2.x - P1.x, P2.y - P1.y) < 5) {
+    setStatus('切割线太短，请重画');
+    return;
+  }
+
+  // 场景坐标 → 主体帧坐标（组包围盒左上 + frameOff 偏移；固定零件 frameOff=0）
   const scaleX = group.scaleX || 1;
   const scaleY = group.scaleY || 1;
   const fox = group.frameOffX || 0;
   const foy = group.frameOffY || 0;
-  const x1 = (cutStart.x   - group.left) / scaleX + fox;
-  const y1 = (cutStart.y   - group.top)  / scaleY + foy;
-  const x2 = (sceneEnd.x   - group.left) / scaleX + fox;
-  const y2 = (sceneEnd.y   - group.top)  / scaleY + foy;
+  const x1 = (P1.x - group.left) / scaleX + fox;
+  const y1 = (P1.y - group.top)  / scaleY + foy;
+  const x2 = (P2.x - group.left) / scaleX + fox;
+  const y2 = (P2.y - group.top)  / scaleY + foy;
 
   const partId = group.partId;
-  cutStart = null;
+  const origLeft = group.left;
+  const origTop  = group.top;
+  const gScale = scaleX;
 
-  setStatus('计算切割预览…');
+  setStatus('切割中…');
   showProgress(0.5);
   try {
-    const r = await api('/api/cut', { id: partId, x1, y1, x2, y2, commit: false });
+    const r = await api('/api/cut', { id: partId, x1, y1, x2, y2, commit: true });
     const { parts: pieces } = await r.json();
     if (!pieces || pieces.length === 0) {
       setStatus('切割未产生有效分块，请调整切割线');
       return;
     }
 
-    // 隐藏原件
-    group.visible = false;
-    canvas.requestRenderAll();
+    // 移除原件（只从画布和 objById 移除，保留 partData/imgElById 供 undo）
+    canvas.remove(group);
+    objById.delete(partId);
 
-    // 计算两块的错开位置（一左一右各偏移半个白边+10px）
-    const gScale = group.scaleX || 1;
-    const spread = borderPx + 10;
-    const offsetsX = [-spread, spread];
-    const pieceIds = [];
-
-    for (let i = 0; i < pieces.length; i++) {
-      const piece = pieces[i];
-      const ox = group.left + (offsetsX[i] || 0);
-      const oy = group.top;
-      await addPart(piece, ox, oy);
-      const po = objById.get(piece.id);
-      if (po) {
-        // 切割预览件锁拖拽 + 继承原零件缩放（切割坐标已按缩放换算到局部，显示也须同倍）
-        po.lockMovementX = true;
-        po.lockMovementY = true;
-        if (gScale !== 1) { po.set({ scaleX: gScale, scaleY: gScale }); po.setCoords(); }
-      }
-      pieceIds.push(piece.id);
-    }
-
-    cutPreview = { origId: partId, pieceIds, x1, y1, x2, y2 };
-    setStatus('Enter 确认 / Esc 取消');
-  } catch (err) {
-    // 恢复原件可见
-    group.visible = true;
-    canvas.requestRenderAll();
-    setStatus('切割预览失败: ' + err.message);
-  } finally {
-    hideProgress();
-  }
-});
-
-// 确认切割
-async function confirmCut() {
-  if (!cutPreview) return;
-  const { origId, pieceIds, x1, y1, x2, y2 } = cutPreview;
-
-  // 记录两块在画布上的当前位置（供重新 addPart 时复用）
-  const previewPositions = pieceIds.map(pid => {
-    const o = objById.get(pid);
-    return o ? { left: o.left, top: o.top } : { left: 0, top: 0 };
-  });
-
-  // 移除预览件（只从画布和 objById 移除，保留 partData/imgElById）
-  for (const pid of pieceIds) {
-    const o = objById.get(pid);
-    if (o) canvas.remove(o);
-    objById.delete(pid);
-    // partData/imgElById 保留
-  }
-
-  setStatus('提交切割…');
-  showProgress(0.5);
-  try {
-    const r = await api('/api/cut', { id: origId, x1, y1, x2, y2, commit: true });
-    const { parts: pieces } = await r.json();
-
-    // 移除原件（只从画布和 objById 移除，保留 partData/imgElById）
-    const orig = objById.get(origId);
-    const gScale = orig ? (orig.scaleX || 1) : 1;
-    if (orig) canvas.remove(orig);
-    objById.delete(origId);
-    // partData/imgElById 保留
-
-    cutPreview = null;
-
-    // 加入真正的两块零件（继承原零件缩放）
-    for (let i = 0; i < pieces.length; i++) {
-      const piece = pieces[i];
-      const pos = previewPositions[i] || { left: 0, top: 0 };
-      await addPart(piece, pos.left, pos.top);
+    // 每块：内容原位对齐(frame_dx/dy) + 沿切割线法线向各自侧推开
+    const ldx = x2 - x1, ldy = y2 - y1;
+    const L = Math.hypot(ldx, ldy) || 1;
+    const nX = -ldy / L, nY = ldx / L;      // dist>0 侧的单位法线（主体帧≈场景方向，无旋转）
+    const GAP = 30 + getBleedMm() * PIXEL_RATIO;   // 分开距离（场景 px）
+    for (const piece of pieces) {
+      // 块中心在原主体帧中的位置 → 判定其在切割线哪一侧
+      const pcx = (piece.frame_dx || 0) + piece.w / 2;
+      const pcy = (piece.frame_dy || 0) + piece.h / 2;
+      const side = Math.sign(ldx * (pcy - y1) - ldy * (pcx - x1)) || 1;
+      const px = origLeft + (piece.frame_dx || 0) * gScale + side * nX * GAP;
+      const py = origTop  + (piece.frame_dy || 0) * gScale + side * nY * GAP;
+      await addPart(piece, px, py);
       const po = objById.get(piece.id);
       if (po && gScale !== 1) { po.set({ scaleX: gScale, scaleY: gScale }); po.setCoords(); }
     }
@@ -1364,13 +1369,9 @@ async function confirmCut() {
     pushSnapshot();
     // spec：确认完成后退出切割模式
     exitCutMode();
-    setStatus('切割完成');
+    setStatus(`切割完成，${pieces.length} 块已沿切割线两侧分开`);
   } catch (err) {
-    // 恢复原件
-    const orig = objById.get(origId);
-    if (orig) { orig.visible = true; canvas.requestRenderAll(); }
-    cutPreview = null;
-    setStatus('切割提交失败: ' + err.message);
+    setStatus('切割失败: ' + err.message);
   } finally {
     hideProgress();
   }

@@ -143,8 +143,59 @@ def apply_brush(part, stroke_mask, mode) -> list:
         # 复用 build_part：source_bgr 帧 + 该连通分量的掩膜，重新推导白边/刀模/参数化
         # 新主体帧原点 = 分量 bbox 左上 - SUBJECT_MARGIN（build_part 内部 pad 足够，不会 clamp）
         sx, sy, _, _ = cv2.boundingRect(c)
-        out.append((build_part(part.source_bgr, c),
-                    (sx - SUBJECT_MARGIN, sy - SUBJECT_MARGIN)))
+        fdx, fdy = sx - SUBJECT_MARGIN, sy - SUBJECT_MARGIN
+        newp = build_part(part.source_bgr, c)
+        # 切割块修补后保留其切割平面（换算到新帧），切口白边不还原
+        if part.cut_planes:
+            newp.cut_planes = [[px1 - fdx, py1 - fdy, px2 - fdx, py2 - fdy]
+                               for (px1, py1, px2, py2) in part.cut_planes]
+        out.append((newp, (fdx, fdy)))
+    return out
+
+
+def cut_part_parametric(part, p1, p2) -> list:
+    """参数化切割：沿 p1->p2（主体帧坐标）把参数化零件切成若干参数化块。
+
+    主体掩膜沿切线平直截断（不含出血——出血只体现在白边/刀模层：
+    渲染时刀模 = buffer(outline, offset) ∩ (半平面边界外移 bleed)，
+    因此切完后白边宽度与出血都仍随全局设定实时可调）。
+
+    Returns:
+        [(Part, (frame_dx, frame_dy)), ...]：每块为新参数化零件，
+        cut_planes 已换算/累积到其新主体帧；frame_dx/dy 含义同 apply_brush。
+        某侧无有效主体时该侧无块；切线不穿过主体时可能只返回一块。
+    """
+    em = part.edit_mask
+    h, w = em.shape
+    x1, y1 = float(p1[0]), float(p1[1])
+    x2, y2 = float(p2[0]), float(p2[1])
+    dx, dy = x2 - x1, y2 - y1
+    length = float(np.hypot(dx, dy))
+    if length < 1.0:
+        return [(part, (0, 0))]
+
+    Y, X = np.indices((h, w))
+    dist = (dx * (Y - y1) - dy * (X - x1)) / length
+
+    out = []
+    # dist>0 侧保留线段方向 (p1→p2)；dist<0 侧取反向 (p2→p1)，使各自保留侧均为 dist>0 约定
+    for side_mask, plane in (
+        ((dist >= 0), [x1, y1, x2, y2]),
+        ((dist <= 0), [x2, y2, x1, y1]),
+    ):
+        m = cv2.bitwise_and(em, side_mask.astype(np.uint8) * 255)
+        comps = ch.separate_components(m, min_area=800)
+        for c in comps:
+            sx, sy, _, _ = cv2.boundingRect(c)
+            fdx, fdy = sx - SUBJECT_MARGIN, sy - SUBJECT_MARGIN
+            newp = build_part(part.source_bgr, c)
+            # 累积切割平面并换算到新主体帧
+            planes = [[px1 - fdx, py1 - fdy, px2 - fdx, py2 - fdy]
+                      for (px1, py1, px2, py2) in (part.cut_planes or [])]
+            planes.append([plane[0] - fdx, plane[1] - fdy,
+                           plane[2] - fdx, plane[3] - fdy])
+            newp.cut_planes = planes
+            out.append((newp, (fdx, fdy)))
     return out
 
 

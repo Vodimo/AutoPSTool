@@ -161,6 +161,64 @@ def test_apply_brush_add_grows():
         assert added_area > erased_area, "add 笔迹后面积应增大"
 
 
+def test_cut_parametric_pieces_and_die_geometry():
+    """参数化切割：竖切过圆心 → 两块参数化零件；刀模在切线处平直截断且越线出血；
+    白边加大时切口边界不变（白边/出血实时可调的几何基础）。"""
+    from app import border, geometry as g
+    img, mask = _single_subject()
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="pc")
+    fh, fw = part.edit_mask.shape
+    mid = fw / 2.0
+
+    results = pb.cut_part_parametric(part, (mid, 0), (mid, fh))
+    assert len(results) == 2, f"竖切过心应得两块，实际 {len(results)}"
+
+    bleed_px = g.mm_to_px(1.5)
+    offset_px = g.mm_to_px(2.0)
+    for piece, (fdx, fdy) in results:
+        assert piece.subject_outline, "切块应仍为参数化零件"
+        assert piece.cut_planes and len(piece.cut_planes) == 1, "切块应带 1 个切割平面"
+        die = border.dieline_polygon(piece.subject_outline, offset_px,
+                                      cut_planes=piece.cut_planes, bleed_px=bleed_px)
+        assert not die.is_empty
+        # 切线在新帧的 x 坐标
+        line_x = mid - fdx
+        minx, _, maxx, _ = die.bounds
+        # 刀模应越过切线约 bleed_px（±2px 容差），不会像普通白边那样鼓出 offset_px
+        over = max(maxx - line_x, line_x - minx)   # 越线深度取决于块在哪一侧
+        # 一侧是主体侧(远大于 bleed)，另一侧是切口侧
+        cut_side_over = min(maxx - line_x, line_x - minx) * -1 \
+            if (maxx < line_x or minx > line_x) else \
+            (maxx - line_x if (line_x - minx) > (maxx - line_x) else line_x - minx)
+        assert abs(cut_side_over - bleed_px) <= 2, \
+            f"切口越线量应≈出血 {bleed_px}px，实际 {cut_side_over:.1f}px"
+
+        # 白边加大 → 主体侧扩张、切口边界仍= line±bleed
+        die_big = border.dieline_polygon(piece.subject_outline, g.mm_to_px(5.0),
+                                          cut_planes=piece.cut_planes, bleed_px=bleed_px)
+        b0, b1 = die.bounds, die_big.bounds
+        assert die_big.area > die.area, "白边加大刀模应变大（白边实时可调）"
+        # 切口侧边界位置不随白边变化
+        if maxx - line_x < line_x - minx:   # 切口在右侧（保留左半）
+            assert abs(b1[2] - b0[2]) <= 2, "切口边界不应随白边变化"
+        else:
+            assert abs(b1[0] - b0[0]) <= 2, "切口边界不应随白边变化"
+
+    # 两块刀模映射回原帧后应有约 2*bleed 的重叠带（印刷出血）
+    (pa, (adx, ady)), (pb_, (bdx, bdy)) = results
+    import shapely.affinity
+    da = shapely.affinity.translate(
+        border.dieline_polygon(pa.subject_outline, offset_px,
+                               cut_planes=pa.cut_planes, bleed_px=bleed_px), adx, ady)
+    db = shapely.affinity.translate(
+        border.dieline_polygon(pb_.subject_outline, offset_px,
+                               cut_planes=pb_.cut_planes, bleed_px=bleed_px), bdx, bdy)
+    inter = da.intersection(db)
+    assert not inter.is_empty, "两块刀模应有出血重叠带"
+    iw = inter.bounds[2] - inter.bounds[0]
+    assert abs(iw - 2 * bleed_px) <= 4, f"重叠带宽应≈2×出血={2*bleed_px}px，实际 {iw:.1f}px"
+
+
 def test_materialize_parametric_then_cut():
     """参数化零件实体化后可正常切割，切出的两块为固定零件(无 subject_outline)。"""
     img, mask = _single_subject()

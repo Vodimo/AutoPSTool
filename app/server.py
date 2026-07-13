@@ -57,6 +57,8 @@ def part_to_dict(part: Part) -> dict:
             "subject_outline": part.subject_outline,
             # 细采样的最外环点集：前端 clipper 直接缓冲它(无端点法粗棱角、无洞连线斜杠)
             "subject_poly": border.outer_polyline(part.subject_outline),
+            # 切割半平面(主体帧)：前端渲染刀模时逐个求交(切口平直+出血越线)
+            "cut_planes": part.cut_planes or [],
             "w": part.subject_image.shape[1], "h": part.subject_image.shape[0],
         }
     rgba = part.image_layer
@@ -120,19 +122,22 @@ def api_cut():
         return jsonify({"error": "part not found"}), 404
     x1, y1 = float(d["x1"]), float(d["y1"])
     x2, y2 = float(d["x2"]), float(d["y2"])
-    # 参数化零件先实体化，固定零件直接使用
     if part.subject_outline:
-        mp = part_builder.materialize_parametric(part, OFFSET_MM)
-        # 主体帧 → 实体化零件局部帧
-        offset_px = g.mm_to_px(OFFSET_MM)
-        alpha = (part.subject_image[:, :, 3] > 0).astype(np.uint8) * 255
-        sx, sy, _, _ = cv2.boundingRect(alpha)
-        fx, fy = sx - offset_px, sy - offset_px
-        x1 -= fx; y1 -= fy
-        x2 -= fx; y2 -= fy
-    else:
-        mp = part
-    a, b = part_builder.cut_part(mp, (x1, y1), (x2, y2), bleed_mm=BLEED_MM)
+        # 参数化路线：主体沿线截断，块仍为参数化零件（白边/出血/平滑保持实时可调）
+        results = part_builder.cut_part_parametric(part, (x1, y1), (x2, y2))
+        if commit:
+            for p, _ in results:
+                PARTS[p.id] = p
+        out = []
+        for p, (fdx, fdy) in results:
+            item = part_to_dict(p)
+            # 新块主体帧原点在原主体帧中的坐标：前端据此原位对齐/沿切线分开摆放
+            item["frame_dx"] = int(fdx)
+            item["frame_dy"] = int(fdy)
+            out.append(item)
+        return jsonify({"parts": out})
+    # 固定零件（历史遗留）仍走像素切割
+    a, b = part_builder.cut_part(part, (x1, y1), (x2, y2), bleed_mm=BLEED_MM)
     pieces = [x for x in (a, b) if x is not None]
     if commit:
         for piece in pieces:
@@ -201,7 +206,7 @@ NEST_JOB = {"running": False, "progress": 1.0, "positions": None, "error": None}
 
 
 def _run_nest(parts, spacing_mm, angle_steps, uniform_scale, offset_mm, page_px,
-              smooth_iters):
+              smooth_iters, bleed_mm):
     """后台线程执行排版，进度写入 NEST_JOB。"""
     def cb(done, total):
         NEST_JOB["progress"] = done / max(1, total)
@@ -216,6 +221,7 @@ def _run_nest(parts, spacing_mm, angle_steps, uniform_scale, offset_mm, page_px,
             page_px=page_px,
             progress_cb=cb,
             smooth_iters=smooth_iters,
+            bleed_mm=bleed_mm,
         )
         NEST_JOB["positions"] = [
             {"id": p.id, "cx": p.cx, "cy": p.cy, "angle": p.rotation, "scale": p.scale}
@@ -257,7 +263,7 @@ def api_nest():
         threading.Thread(
             target=_run_nest,
             args=(parts, spacing_mm, angle_steps, uniform_scale, OFFSET_MM, page_px,
-                  SMOOTH_ITERS),
+                  SMOOTH_ITERS, BLEED_MM),
             daemon=True,
         ).start()
         return jsonify({"job": True})
@@ -270,6 +276,7 @@ def api_nest():
         uniform_scale=uniform_scale,
         page_px=page_px,
         smooth_iters=SMOOTH_ITERS,
+        bleed_mm=BLEED_MM,
     )
 
     return jsonify({
@@ -351,7 +358,7 @@ def api_export():
         parts.append(p)
     img = exporter.render_png(parts, offset_mm=OFFSET_MM,
                                page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)),
-                               smooth_iters=SMOOTH_ITERS)
+                               smooth_iters=SMOOTH_ITERS, bleed_mm=BLEED_MM)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)

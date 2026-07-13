@@ -48,6 +48,14 @@ input[type=number]:disabled { background: #f1f5f9; color: #94a3b8; }
               box-shadow: 0 1px 4px rgba(0,0,0,.25); user-select: none; white-space: nowrap; }
 #lock-badge:hover { background: #db2777; }
 
+/* —— 切割确认条 —— */
+#cut-bar { position: absolute; z-index: 10; display: flex; gap: 6px; padding: 4px;
+           background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+           box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+#cut-bar button { padding: 4px 10px; font-size: 12px; }
+#cut-confirm { background: #ec4899; color: #fff; border-color: #ec4899; }
+#cut-confirm:hover { background: #db2777; }
+
 /* —— 底部状态栏 —— */
 #statusbar { display: flex; align-items: center; gap: 16px; padding: 4px 12px;
              background: #fff; border-top: 1px solid #e2e8f0; flex-shrink: 0; font-size: 12px; }
