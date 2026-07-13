@@ -1122,13 +1122,87 @@ bleedNum.onchange  = onBleedChange;
 bleedUnit.onchange = onBleedChange;
 
 // 切割状态变量
-// 交互流程：点选目标零件 → 第一次左键=起点(线随鼠标) → 第二次左键=终点
-// → 线暂存可拖动微调 → 确认条「确认切割/取消」（或 Enter/Esc）→ 切完两块沿切割线两侧分开
+// 状态机（消除"选目标"与"画线"的左键歧义）：
+//   选目标阶段：点击零件 = 设为目标 → 进入画线阶段（所有零件对鼠标透明）
+//   画线阶段：第一次左键=起点，线随鼠标；第二次左键=终点 → 暂存态
+//   暂存态：整线可拖 + 两个端点手柄可拖；「确认切割/取消」或 Enter/Esc
+//   Esc 三级回退：取消线 → 清目标（回选目标阶段）→ 退出模式
 let cutMode = false;            // 是否处于切割模式
-let cutTarget = null;           // 切割目标零件（点选设定，点击其他零件换目标）
-let cutDrawing = false;         // 第一击后：线跟随鼠标
-let cutPending = false;         // 第二击后：线暂存可拖动，等待确认
+let cutTarget = null;           // 切割目标零件
+let cutDrawing = false;         // 画线中：线终点跟随鼠标
+let cutPending = false;         // 暂存态：等待确认
 let cutLine = null;             // 切割线(fabric.Line, 洋红虚线)
+let cutP1 = null;               // 线端点（场景坐标，真相源——fabric.Line 改端点
+let cutP2 = null;               //   不重算渲染位置，必须由端点变量重建线）
+let cutHandles = [];            // 暂存态两个端点手柄(fabric.Circle)
+
+// 画线阶段把零件设为对鼠标透明：左键点击纯画线，不会误选/误换零件
+function setPartsEvented(flag) {
+  canvas.getObjects().forEach(o => { if (o.partId) o.evented = flag; });
+}
+
+// 由 cutP1/P2 重建切割线；interactive=true 时线可拖动（暂存态）
+function renderCutLine(interactive) {
+  if (cutLine) canvas.remove(cutLine);
+  cutLine = new fabric.Line([cutP1.x, cutP1.y, cutP2.x, cutP2.y], {
+    stroke: '#FF00FF', strokeWidth: 2, strokeDashArray: [6, 6],
+    selectable: !!interactive, evented: !!interactive,
+    hasControls: false, hasBorders: false, lockRotation: true,
+    hoverCursor: 'move', excludeFromExport: true, objectCaching: false,
+  });
+  if (interactive) {
+    cutLine.on('moving', () => {
+      // 整线被拖动：从线的实际端点回写真相源并重定位手柄
+      const m = cutLine.calcTransformMatrix();
+      const lp = cutLine.calcLinePoints();
+      const a = fabric.util.transformPoint(new fabric.Point(lp.x1, lp.y1), m);
+      const b = fabric.util.transformPoint(new fabric.Point(lp.x2, lp.y2), m);
+      cutP1 = { x: a.x, y: a.y };
+      cutP2 = { x: b.x, y: b.y };
+      positionCutHandles();
+    });
+  }
+  canvas.add(cutLine);
+  canvas.bringToFront(cutLine);
+}
+
+// 端点手柄：白底洋红圆，可拖动调整线端点
+function makeCutHandles() {
+  removeCutHandles();
+  const r = 6 / Math.max(0.2, canvas.getZoom());   // 屏幕上约 6px
+  [cutP1, cutP2].forEach((pt, idx) => {
+    const h = new fabric.Circle({
+      left: pt.x, top: pt.y, radius: r,
+      originX: 'center', originY: 'center',
+      fill: '#fff', stroke: '#FF00FF', strokeWidth: 2 / Math.max(0.2, canvas.getZoom()),
+      hasControls: false, hasBorders: false,
+      hoverCursor: 'crosshair', excludeFromExport: true, objectCaching: false,
+    });
+    h.isCutHandle = true;
+    h.on('moving', () => {
+      const c = h.getCenterPoint();
+      if (idx === 0) cutP1 = { x: c.x, y: c.y };
+      else cutP2 = { x: c.x, y: c.y };
+      renderCutLine(true);
+      cutHandles.forEach(hh => canvas.bringToFront(hh));
+    });
+    canvas.add(h);
+    canvas.bringToFront(h);
+    cutHandles.push(h);
+  });
+}
+function positionCutHandles() {
+  if (cutHandles.length === 2) {
+    cutHandles[0].set({ left: cutP1.x, top: cutP1.y });
+    cutHandles[0].setCoords();
+    cutHandles[1].set({ left: cutP2.x, top: cutP2.y });
+    cutHandles[1].setCoords();
+  }
+}
+function removeCutHandles() {
+  for (const h of cutHandles) canvas.remove(h);
+  cutHandles = [];
+}
 
 // 切割模式：进入/退出
 function enterCutMode() {
@@ -1136,7 +1210,7 @@ function enterCutMode() {
   if (brushMode) exitBrushMode();
   cutMode = true;
   document.getElementById('btn-cut').classList.add('active');
-  // 禁止所有零件拖拽（保留可选），禁止空白框选（空白处点击=画切割线）
+  // 禁止所有零件拖拽（保留可选），禁止空白框选
   canvas.getObjects().forEach(o => {
     if (o.partId) {
       o.lockMovementX = true;
@@ -1144,24 +1218,31 @@ function enterCutMode() {
     }
   });
   canvas.selection = false;
-  // 若已有选中的可切零件，直接作为目标
+  // 若已有选中的可切零件，直接作为目标进入画线阶段
   const a = canvas.getActiveObject();
-  if (a && a.partId && !a.locked && Math.abs(a.angle || 0) < 0.5) cutTarget = a;
-  showBanner('✂️ 切割模式：点选目标零件 → 左键点起点 → 移动 → 再左键点终点 → 拖线微调 → 确认切割');
-  setStatus(cutTarget ? '切割目标已选中，左键点切割线起点' : '切割：先点选一个目标零件');
+  if (a && a.partId && !a.locked && Math.abs(a.angle || 0) < 0.5) {
+    cutTarget = a;
+    setPartsEvented(false);
+    showBanner('✂️ 画切割线：左键点起点 → 移动 → 左键点终点（Esc 重新选目标）');
+    setStatus('目标已选中，左键点切割线起点（任意位置）');
+  } else {
+    showBanner('✂️ 切割模式：先点选一个目标零件（Esc 退出）');
+    setStatus('切割：先点选一个目标零件');
+  }
 }
 
 function exitCutMode() {
   cutMode = false;
   document.getElementById('btn-cut').classList.remove('active');
   cancelCutLine();
-  // 恢复所有零件可拖拽
+  // 恢复所有零件可拖拽/可命中
   canvas.getObjects().forEach(o => {
     if (o.partId) {
       o.lockMovementX = false;
       o.lockMovementY = false;
     }
   });
+  setPartsEvented(true);
   canvas.selection = true;
   cutTarget = null;
   hideBanner();
@@ -1169,15 +1250,18 @@ function exitCutMode() {
   setStatus('已退出切割模式');
 }
 
-// 取消当前切割线（不退出模式）
+// 取消当前切割线（不退出模式、不清目标）
 function cancelCutLine() {
+  canvas.discardActiveObject();
   if (cutLine) {
-    canvas.discardActiveObject();
     canvas.remove(cutLine);
     cutLine = null;
   }
+  removeCutHandles();
   cutDrawing = false;
   cutPending = false;
+  cutP1 = null;
+  cutP2 = null;
   cutBar.style.display = 'none';
   canvas.requestRenderAll();
 }
@@ -1198,7 +1282,7 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Enter 确认切割 / Esc 取消线（无线时退出模式）
+// Enter 确认切割 / Esc 三级回退：取消线 → 清目标 → 退出模式
 window.addEventListener('keydown', (e) => {
   if (!cutMode) return;
   if (e.key === 'Enter' && cutPending) {
@@ -1208,90 +1292,85 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (cutDrawing || cutPending) {
       cancelCutLine();
-      setStatus('已取消切割线');
+      setStatus('已取消切割线，左键重新点起点');
+    } else if (cutTarget) {
+      cutTarget = null;
+      setPartsEvented(true);
+      canvas.discardActiveObject();
+      canvas.requestRenderAll();
+      showBanner('✂️ 切割模式：先点选一个目标零件（Esc 退出）');
+      setStatus('已清除切割目标，点选零件');
     } else {
       exitCutMode();
     }
   }
 });
 
-// 切割 mouse:down：两击画线
+// 切割 mouse:down：状态机分派
 canvas.on('mouse:down', function (opt) {
   if (!cutMode || isPanning) return;
   const target = opt.target;
 
-  // 第二击：定终点，线暂存可拖动 + 显示确认条
-  if (cutDrawing && cutLine) {
+  // 暂存态：点线/端点手柄 = fabric 拖动；点其他地方仅提示
+  if (cutPending) {
+    if (target !== cutLine && !(target && target.isCutHandle)) {
+      setStatus('拖动线或端点微调，点「确认切割」执行，Esc 取消');
+    }
+    return;
+  }
+
+  const ptr = canvas.getPointer(opt.e);
+
+  // 画线阶段第二击：定终点 → 暂存态（线+端点手柄可拖）
+  if (cutDrawing) {
+    cutP2 = { x: ptr.x, y: ptr.y };
+    if (Math.hypot(cutP2.x - cutP1.x, cutP2.y - cutP1.y) < 5) {
+      return;   // 原地双击忽略，继续画线
+    }
     cutDrawing = false;
     cutPending = true;
-    cutLine.set({
-      selectable: true, evented: true,
-      hasControls: false, lockRotation: true,
-      hoverCursor: 'move',
-    });
-    cutLine.setCoords();
-    canvas.setActiveObject(cutLine);
+    renderCutLine(true);
+    makeCutHandles();
     canvas.requestRenderAll();
-    setStatus('可拖动切割线微调位置，点「确认切割」或 Enter 执行');
+    setStatus('拖动线或端点微调，点「确认切割」或 Enter 执行');
     return;
   }
 
-  // 待确认状态：点线=fabric 拖动；点其他地方提示
-  if (cutPending) {
-    if (target !== cutLine) setStatus('请先「确认切割」或按 Esc 取消当前切割线');
-    return;
-  }
-
-  // 目标选择/切换（校验锁角/旋转）
-  if (target && target.partId && target !== cutTarget) {
-    if (target.locked || Math.abs(target.angle || 0) > 0.5) {
-      setStatus('该零件已锁角/旋转，请先按 L 归零再切割');
-      return;
-    }
-    cutTarget = target;
-    canvas.setActiveObject(target);
-    canvas.requestRenderAll();
-    setStatus('切割目标已选中，左键点切割线起点（可在零件外）');
-    return;   // 本次点击仅选目标
-  }
+  // 选目标阶段：点击零件 = 设为目标并进入画线阶段
   if (!cutTarget) {
-    setStatus('切割：先点选一个目标零件');
-    return;
-  }
-  // 目标可能在选中后被旋转，起笔前再校验一次
-  if (cutTarget.locked || Math.abs(cutTarget.angle || 0) > 0.5) {
-    setStatus('目标零件已锁角/旋转，请先按 L 归零再切割');
+    if (target && target.partId) {
+      if (target.locked || Math.abs(target.angle || 0) > 0.5) {
+        setStatus('该零件已锁角/旋转，请先按 L 归零再切割');
+        return;
+      }
+      cutTarget = target;
+      canvas.setActiveObject(target);
+      // 零件对鼠标透明：之后的左键全部用于画线，不会误选其他零件
+      setPartsEvented(false);
+      canvas.requestRenderAll();
+      showBanner('✂️ 画切割线：左键点起点 → 移动 → 左键点终点（Esc 重新选目标）');
+      setStatus('目标已选中，左键点切割线起点（任意位置）');
+    } else {
+      setStatus('切割：先点选一个目标零件');
+    }
     return;
   }
 
-  // 第一击：起点，线开始跟随鼠标
-  const ptr = canvas.getPointer(opt.e);
+  // 画线阶段第一击：起点（零件已透明，任意位置的左键都到这里）
   cutDrawing = true;
-  // objectCaching 必须关闭：缓存位图不随 x2/y2 更新失效，移动时线不可见
-  cutLine = new fabric.Line(
-    [ptr.x, ptr.y, ptr.x, ptr.y],
-    {
-      stroke: '#FF00FF',
-      strokeWidth: 2,
-      strokeDashArray: [6, 6],
-      selectable: false,
-      evented: false,
-      excludeFromExport: true,
-      objectCaching: false,
-    }
-  );
-  canvas.add(cutLine);
-  canvas.bringToFront(cutLine);
+  cutP1 = { x: ptr.x, y: ptr.y };
+  cutP2 = { x: ptr.x, y: ptr.y };
+  renderCutLine(false);
   canvas.requestRenderAll();
   setStatus('移动鼠标，再次左键确定切割线终点');
 });
 
-// 画线阶段：线终点跟随鼠标（无需按住）
+// 画线阶段：线终点跟随鼠标（无需按住；每次由端点变量重建线，任意方向都正确渲染）
 canvas.on('mouse:move', function (opt) {
-  if (!cutMode || !cutDrawing || !cutLine || isPanning) return;
+  if (!cutMode || !cutDrawing || !cutP1 || isPanning) return;
   const ptr = canvas.getPointer(opt.e);
-  cutLine.set({ x2: ptr.x, y2: ptr.y });
-  cutLine.setCoords();
+  cutP2 = { x: ptr.x, y: ptr.y };
+  renderCutLine(false);
   canvas.requestRenderAll();
 });
 
@@ -1304,14 +1383,12 @@ document.getElementById('cut-cancel').onclick = () => {
 
 // 执行切割：按暂存切割线切目标零件，切完两块沿切割线法线分居两侧（内容对齐）
 async function doCut() {
-  if (!cutPending || !cutLine || !cutTarget) return;
+  if (!cutPending || !cutTarget || !cutP1 || !cutP2) return;
   const group = cutTarget;
 
-  // 线端点场景坐标（线可能被拖动过：经变换矩阵还原）
-  const m = cutLine.calcTransformMatrix();
-  const lp = cutLine.calcLinePoints();
-  const P1 = fabric.util.transformPoint(new fabric.Point(lp.x1, lp.y1), m);
-  const P2 = fabric.util.transformPoint(new fabric.Point(lp.x2, lp.y2), m);
+  // 端点真相源（线/手柄拖动时已实时回写）
+  const P1 = { x: cutP1.x, y: cutP1.y };
+  const P2 = { x: cutP2.x, y: cutP2.y };
   cancelCutLine();
 
   if (Math.hypot(P2.x - P1.x, P2.y - P1.y) < 5) {
