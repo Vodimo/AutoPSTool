@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoPSTool 测试清单</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #f1f5f9; color: #1e293b; padding: 0 0 60px; }
+#topbar { position: sticky; top: 0; z-index: 20; background: #fff; border-bottom: 1px solid #e2e8f0;
+          padding: 10px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+#topbar h1 { font-size: 16px; color: #ec4899; }
+#stats { font-size: 13px; color: #475569; }
+#stats b { font-size: 15px; }
+.ok-c { color: #16a34a; } .fail-c { color: #dc2626; } .skip-c { color: #94a3b8; }
+#bar { flex: 1 1 160px; height: 8px; background: #e2e8f0; border-radius: 4px; overflow: hidden; display: flex; min-width: 120px; }
+#bar div { height: 100%; }
+#bar .b-ok { background: #22c55e; } #bar .b-fail { background: #ef4444; } #bar .b-skip { background: #cbd5e1; }
+#topbar button { padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff;
+                 cursor: pointer; font-size: 13px; }
+#topbar button:hover { background: #f8fafc; }
+#btn-export { background: #ec4899; color: #fff; border-color: #ec4899; }
+#btn-export:hover { background: #db2777; }
+main { max-width: 900px; margin: 0 auto; padding: 16px 20px; }
+h2 { font-size: 15px; margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #fbcfe8; }
+.item { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.item.st-ok { border-left: 4px solid #22c55e; }
+.item.st-fail { border-left: 4px solid #ef4444; background: #fef2f2; }
+.item.st-skip { border-left: 4px solid #cbd5e1; opacity: .75; }
+.item-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.item-id { font-weight: 700; color: #ec4899; white-space: nowrap; }
+.item-title { font-weight: 600; }
+.item-src { font-size: 11px; color: #94a3b8; margin-left: auto; white-space: nowrap; }
+.item-steps { font-size: 13px; color: #475569; margin: 4px 0 8px; line-height: 1.5; }
+.item-ctl { display: flex; gap: 6px; align-items: flex-start; flex-wrap: wrap; }
+.item-ctl button { padding: 4px 12px; border: 1px solid #cbd5e1; border-radius: 14px; background: #fff;
+                   cursor: pointer; font-size: 12px; }
+.item-ctl button.sel-ok { background: #22c55e; color: #fff; border-color: #22c55e; }
+.item-ctl button.sel-fail { background: #ef4444; color: #fff; border-color: #ef4444; }
+.item-ctl button.sel-skip { background: #94a3b8; color: #fff; border-color: #94a3b8; }
+.item-ctl textarea { flex: 1 1 240px; min-height: 30px; padding: 4px 8px; font-size: 12px;
+                     font-family: inherit; border: 1px solid #cbd5e1; border-radius: 6px; resize: vertical; }
+#deviation { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 14px;
+             font-size: 13px; line-height: 1.6; margin-top: 24px; color: #713f12; }
+#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1e293b;
+         color: #fff; padding: 8px 18px; border-radius: 20px; font-size: 13px; display: none; z-index: 30; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>AutoPSTool 测试清单</h1>
+  <span id="stats"></span>
+  <div id="bar"><div class="b-ok"></div><div class="b-fail"></div><div class="b-skip"></div></div>
+  <button id="btn-export">📋 复制测试结果</button>
+  <button id="btn-reset">清空重测</button>
+</div>
+
+<main id="list"></main>
+
+<div id="toast"></div>
+
+<script>
+// 〔spec·N站〕= 头脑风暴第 N 站约定；〔反馈〕= 使用反馈修复项
+const GROUPS = [
+["一、导入与工作区〔spec·1站〕", [
+["1.1","多选导入","点「📥 导入」一次框选多张图 → 逐张显示抠图进度，全部主体追加到画布（不清空已有零件）","spec·1站"],
+["1.2","抠图质量","11 只猫全部分离为独立零件，白猫内部无透明洞，边缘干净","spec·2站"],
+["1.3","滚轮缩放","以鼠标位置为锚点缩放，范围 10%–800%，右下角显示缩放百分比","spec·1站"],
+["1.4","空格平移","按住空格拖动画布平移；松开恢复正常选择","spec·1站"],
+["1.5","中键平移","按住鼠标中键拖动平移（不触发浏览器自动滚动圆点）","反馈"],
+["1.6","适应视图","点「⤢ 适应视图」→ 纸框和所有零件完整可见、居中","spec·1站"],
+["1.7","纸张预设","A4/A3/A5/Letter 一键切换，纸框（白色矩形）尺寸随之变化","spec·1站"],
+["1.8","自定义纸张","选「自定义」后宽高可输入，mm/px 单位切换数值正确换算","spec·1站"],
+["1.9","改纸张零件不动","改纸张尺寸后已摆放零件位置不变，露到框外的零件照常显示","spec·1站"],
+["1.10","视图变换后点选准确","缩放平移视图后点击零件，选中的就是点的那个（无错位）","反馈"],
+]],
+["二、白边 / 刀模线 / 平滑〔spec·2站〕", [
+["2.1","白边实时调","拖白边滑块，所有零件白边宽度实时变化；数值框与 mm/px 单位联动","spec·2站"],
+["2.2","刀模线实时显示","画布上每个零件外缘有洋红刀模线，随拖/缩/白边实时更新","spec·2站"],
+["2.3","刀模线平滑无锯齿","放大看刀模线是平滑曲线（potrace 矢量），不是像素阶梯","spec·2站"],
+["2.4","平滑滑块","0=现状；调到 2–3 后白边轮廓的直边折线感消失，变圆润","反馈"],
+["2.5","白边居中重算","调白边时零件绕自身中心胀缩，不向右下漂移","反馈"],
+]],
+["三、修补画笔〔spec·2站〕", [
+["3.1","进出模式","「🖌️ 修补」按钮或 B 键进出；顶部出现洋红横幅提示；Esc 可退出","spec·2站"],
+["3.2","加/擦切换","工具栏「加/擦」下拉；加=绿色预览，擦=红色预览","spec·2站"],
+["3.3","笔刷大小","滑块调整，涂抹时预览线粗细一致","spec·2站"],
+["3.4","多笔累积","可连续涂多笔（同一零件），笔迹全部保留显示","反馈"],
+["3.5","Enter 应用 / Esc 取消","Enter 一次性应用全部笔迹；Esc 清除笔迹不退出模式，再 Esc 退出模式","反馈"],
+["3.6","涂抹位置精准","笔迹落点就在鼠标处（不偏移）","反馈"],
+["3.7","擦桥分件","用「擦」画断两个相连主体之间的桥 → 应用后分裂成两个独立零件","spec·2站"],
+["3.8","修补不跳位","应用后零件停留原位（图像内容严格对齐）","反馈"],
+["3.9","修补后仍参数化","修补产物的白边仍随白边滑块实时变化","反馈"],
+["3.10","旋转零件拦截","对旋转过的零件涂抹 → 提示先按 L 归零","反馈"],
+["3.11","缩放零件笔径一致","对放大过的零件涂抹，笔迹在屏幕上的粗细与设定一致","反馈"],
+]],
+["四、选择 / 变换 / 锁角〔spec·3站〕", [
+["4.1","逐像素点选","点零件周围的透明区域不会选中它；两零件靠近时点到谁的主体/白边就选谁","反馈"],
+["4.2","框选多选","空白处拖框可多选；多选整体拖动；删除多选；多选操作可撤销","spec·3站"],
+["4.3","等比缩放","选中零件只有四角手柄（无中边手柄），拖角始终等比缩放","spec·3站"],
+["4.4","旋转即锁角+常显","拖旋转手柄后零件自动锁角，描边变洋红且不选中时也常显","反馈"],
+["4.5","锁角浮标签","选中锁角零件浮现「📌 角度已锁 · 点击解除」，点击后角度归零（绕中心不跳位）","spec·3站"],
+["4.6","L 键解锁","选中锁角零件按 L → 解锁归零","spec·3站"],
+["4.7","快捷键不干扰输入","光标在任一输入框内时按 C/B/L/空格不触发对应功能","反馈"],
+]],
+["五、切割〔spec·3站 + 多轮反馈重做〕", [
+["5.1","进出模式","「✂️ 切割」按钮或 C 键进出；横幅按阶段提示（选目标 → 画线）","spec·3站"],
+["5.2","点选目标","点击零件设为切割目标（高亮）；旋转/锁角零件被拒并提示","spec·3站"],
+["5.3","画线不歧义","选定目标后，左键点击任何位置（包括其他零件身上）都是画线起点，不会误换目标","反馈"],
+["5.4","两击画线+实时跟随","第一击定起点后，虚线终点实时跟随鼠标（上下左右任意方向）；第二击定终点","反馈"],
+["5.5","暂存可调","线定型后出现两个端点圆手柄 + 确认条；可拖整线平移、拖端点单独调整","反馈"],
+["5.6","确认/取消","「✂️ 确认切割」或 Enter 执行；「取消」或 Esc 放弃这条线可重画","spec·3站"],
+["5.7","Esc 三级回退","有线时 Esc=取消线；无线有目标时 Esc=重选目标；都没有时 Esc=退出模式","反馈"],
+["5.8","切完两侧分开","切出的两块沿切割线法线方向分居两侧（不重叠在原地）","反馈"],
+["5.9","切割块仍参数化","切出的块白边仍随白边滑块实时变化","反馈"],
+["5.10","出血可调且生效","调「出血」数值后切割/对已切块调出血 → 切口两侧重叠量变化","反馈"],
+["5.11","切口平直","切割边缘笔直（不被磨圆），非切割边缘平滑","spec·3站"],
+["5.12","缩放零件切割","放大过的零件切完，两块保持同样放大倍数","反馈"],
+["5.13","确认后自动退出","切割完成自动退出切割模式，零件恢复可拖动","spec·3站"],
+]],
+["六、排版〔spec·4站〕", [
+["6.1","真实进度","点「🧩 整理排版」，进度条随零件逐个放置递进（不是卡住再跳 100%）","反馈"],
+["6.2","紧凑排版","11 只猫在 A4 内全部放下，自由零件被自动旋转塞紧，无重叠","spec·4站"],
+["6.3","锁角保角","先把某零件旋转锁角，排版后它保持该角度只挪位置","spec·4站"],
+["6.4","精度滑块","1（快）→ 24（极致）连续可调；高精度更紧但更慢","spec·4站"],
+["6.5","间距生效","间距调大（如 5mm）重排 → 零件间隙明显变大；mm/px 换算正确","spec·4站"],
+["6.6","统一缩放","小纸张（如 A5）放不下时勾选「统一缩放」→ 全部零件按同一比例缩小后全部放下","spec·4站"],
+["6.7","放不下留框外","不勾统一缩放 + 小纸张 → 放不下的零件移到纸框右侧一列，状态栏提示数量","spec·4站"],
+["6.8","排版可撤销","Ctrl+Z 恢复排版前的位置角度","spec·3站"],
+]],
+["七、撤销 / 重做〔spec·3站〕", [
+["7.1","快捷键","Ctrl+Z 撤销、Ctrl+Y / Ctrl+Shift+Z 重做","spec·3站"],
+["7.2","覆盖所有操作","移动/缩放/旋转锁角/解锁/删除/导入/白边/平滑/出血/纸张/切割/修补/排版 均可撤销重做","spec·3站"],
+["7.3","一次手势一步","拖动一次=一步；多选拖动一次=一步","spec·3站"],
+["7.4","撤销后 UI 同步","撤销白边/平滑/纸张改动后，工具栏滑块/输入框数值同步恢复","反馈"],
+]],
+["八、导出〔spec·5站〕", [
+["8.1","导出 PNG","下载 diecut_layout.png，尺寸=当前纸张，白底+主体+洋红刀模线","spec·5站"],
+["8.2","所见即所得","导出图中零件位置/缩放/旋转与画布一致（含 45° 等非直角）","spec·3站"],
+["8.3","框外过滤+提示","有零件在纸框外时弹确认框提示数量；确认后仅导出框内零件","spec·5站"],
+["8.4","贴边不误判","排版排满贴边的零件不会被误判为框外","反馈"],
+["8.5","刀模线完整","导出图上刀模线闭合完整、不被裁边；平滑设置对导出生效","反馈"],
+["8.6","出血体现","切割过的两块在导出图上切口处互相延伸（出血重叠）","spec·3站"],
+]],
+["九、全局体验〔spec·全局〕", [
+["9.1","耗时操作有反馈","抠图/排版/切割/修补/导出期间有进度条+状态文字，界面不假死","spec·全局"],
+["9.2","界面分组清晰","工具栏分组（文件/白边/纸张/工具/排版/视图）；控件悬停有提示","反馈"],
+["9.3","状态栏","底部显示当前状态、快捷键提示、缩放百分比","反馈"],
+["9.4","单位贯穿","白边/出血/间距/纸张数值均支持 mm 与 px 且换算一致（1mm=10px）","spec·全局"],
+["9.5","无报错","完整走完流程，浏览器控制台（F12）无红色报错","spec·全局"],
+]],
+];
+
+const KEY = 'autopstool-test-checklist-v1';
+let state = {};
+try { state = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { state = {}; }
+function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+
+const listEl = document.getElementById('list');
+const allIds = [];
+
+for (const [gname, items] of GROUPS) {
+  const h = document.createElement('h2');
+  h.textContent = gname;
+  listEl.appendChild(h);
+  for (const [id, title, steps, src] of items) {
+    allIds.push(id);
+    const div = document.createElement('div');
+    div.className = 'item';
+    div.id = 'item-' + id;
+    div.innerHTML =
+      '<div class="item-head"><span class="item-id">' + id + '</span>' +
+      '<span class="item-title">' + title + '</span>' +
+      '<span class="item-src">〔' + src + '〕</span></div>' +
+      '<div class="item-steps">' + steps + '</div>' +
+      '<div class="item-ctl">' +
+      '<button data-st="ok">✅ 通过</button>' +
+      '<button data-st="fail">❌ 不过</button>' +
+      '<button data-st="skip">⏭ 跳过</button>' +
+      '<textarea placeholder="备注：现象、复现步骤…（不过时请填写）"></textarea>' +
+      '</div>';
+    const ta = div.querySelector('textarea');
+    const btns = div.querySelectorAll('button');
+    function apply() {
+      const s = state[id] || {};
+      div.className = 'item' + (s.st ? ' st-' + s.st : '');
+      btns.forEach(b => b.className = (s.st === b.dataset.st) ? 'sel-' + s.st : '');
+      if (ta.value !== (s.note || '')) ta.value = s.note || '';
+      updateStats();
+    }
+    btns.forEach(b => b.onclick = () => {
+      const cur = state[id] || {};
+      cur.st = (cur.st === b.dataset.st) ? null : b.dataset.st;   // 再点一次取消
+      state[id] = cur; save(); apply();
+    });
+    ta.oninput = () => { state[id] = state[id] || {}; state[id].note = ta.value; save(); };
+    listEl.appendChild(div);
+    apply();
+  }
+}
+
+const dev = document.createElement('div');
+dev.id = 'deviation';
+dev.innerHTML = '<b>已知偏差（设计时已声明）：</b>① 排版引擎为服务端旋转感知 BLF（spec 原定 SVGnest），功能目标均已覆盖，模块边界保留可替换；② 旋转零件的切割/修补按约定拦截（先归零）；③ 导出仅 PNG，矢量数据已备齐留待 SVG/PDF。';
+listEl.appendChild(dev);
+
+function updateStats() {
+  let ok = 0, fail = 0, skip = 0;
+  for (const id of allIds) {
+    const s = (state[id] || {}).st;
+    if (s === 'ok') ok++; else if (s === 'fail') fail++; else if (s === 'skip') skip++;
+  }
+  const total = allIds.length, done = ok + fail + skip;
+  document.getElementById('stats').innerHTML =
+    '<b class="ok-c">' + ok + '</b> 通过 · <b class="fail-c">' + fail + '</b> 不过 · ' +
+    '<b class="skip-c">' + skip + '</b> 跳过 · 剩 <b>' + (total - done) + '</b>/' + total;
+  const bar = document.getElementById('bar');
+  bar.querySelector('.b-ok').style.width = (ok / total * 100) + '%';
+  bar.querySelector('.b-fail').style.width = (fail / total * 100) + '%';
+  bar.querySelector('.b-skip').style.width = (skip / total * 100) + '%';
+}
+updateStats();
+
+document.getElementById('btn-export').onclick = () => {
+  const lines = ['# AutoPSTool 测试结果 ' + new Date().toLocaleString()];
+  let ok = 0, fail = 0, skip = 0, todo = 0;
+  const failLines = [], otherLines = [];
+  for (const [gname, items] of GROUPS) {
+    for (const [id, title] of items) {
+      const s = state[id] || {};
+      const mark = s.st === 'ok' ? '✅' : s.st === 'fail' ? '❌' : s.st === 'skip' ? '⏭' : '⬜';
+      if (s.st === 'ok') ok++; else if (s.st === 'fail') fail++; else if (s.st === 'skip') skip++; else todo++;
+      const note = s.note ? '　—— ' + s.note.replace(/\n/g, ' / ') : '';
+      const line = mark + ' ' + id + ' ' + title + note;
+      (s.st === 'fail' ? failLines : otherLines).push(line);
+    }
+  }
+  lines.push('通过 ' + ok + ' · 不过 ' + fail + ' · 跳过 ' + skip + ' · 未测 ' + todo, '');
+  if (failLines.length) { lines.push('## ❌ 不通过项', ...failLines, ''); }
+  lines.push('## 全部明细', ...otherLines);
+  const text = lines.join('\n');
+  navigator.clipboard.writeText(text).then(
+    () => toast('已复制到剪贴板，可直接粘贴发给 Claude'),
+    () => { window.prompt('复制失败，请手动全选复制：', text); }
+  );
+};
+
+document.getElementById('btn-reset').onclick = () => {
+  if (confirm('清空所有勾选与备注，重新开始？')) {
+    state = {}; save(); location.reload();
+  }
+};
+
+let toastTimer = null;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.style.display = 'none', 2500);
+}
+</script>
+</body>
+</html>
