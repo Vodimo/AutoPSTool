@@ -13,10 +13,15 @@ class Part:
     subject_image: "np.ndarray | None" = None   # 纯主体 RGBA(透明底,不含白边)
     subject_outline: str = ""                    # 主体掩膜矢量轮廓(主体 bbox 局部坐标)
     source_bgr: "np.ndarray | None" = None      # 主体帧 BGR 原色(未掩膜,与 edit_mask 同帧)
-    edit_mask: "np.ndarray | None" = None       # 主体帧 0/255 掩膜(与 subject_image 同帧)
+    edit_mask: "np.ndarray | None" = None       # 主体帧 0/255 真实主体掩膜(刀模/轮廓的来源)
+    art_mask: "np.ndarray | None" = None        # 主体帧 0/255 印刷素材掩膜(= edit_mask + 越过
+                                                 # 切线最多 MAX_BLEED 的对侧素材)。仅切割块非 None；
+                                                 # subject_image 由它上色, 故图像含出血素材
     cut_planes: "list | None" = None            # [[x1,y1,x2,y2],...] 切割半平面(主体帧坐标)
                                                  # 保留侧 = dist>0, dist=(dx*(Y-y1)-dy*(X-x1))/L
-                                                 # 刀模在切线处平直截断, 允许越线出血 bleed
+                                                 # 刀模线正好落在切线上; 图像越线延伸 bleed = 出血
+    frame_ox: int = 0                           # 主体帧原点在输入图中的 x(供切割/修补对齐用)
+    frame_oy: int = 0
     x: int = 0
     y: int = 0
     scale: float = 1.0

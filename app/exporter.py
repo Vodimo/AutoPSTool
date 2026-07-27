@@ -4,7 +4,7 @@
 """
 import math
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from app import geometry as g
 from app import vectorize as vz
@@ -34,24 +34,30 @@ def _build_tile(part, offset_px: float, smooth_iters: int = 0,
 
     if part.subject_outline:
         # —— 参数化零件 ——
-        poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters,
-                                       cut_planes=part.cut_planes, bleed_px=bleed_px)
-        if poly.is_empty:
+        # 印刷区 = 刀模区 + 越过切线的出血带；刀模区 = 刀模线所在轮廓（切线处 bleed=0）
+        print_poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters,
+                                            cut_planes=part.cut_planes, bleed_px=bleed_px)
+        if print_poly.is_empty:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0)), 1.0, 1.0
-        minx, miny, maxx, maxy = poly.bounds
+        die_poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters,
+                                          cut_planes=part.cut_planes, bleed_px=0.0)
+        minx, miny, maxx, maxy = print_poly.bounds
         cw = max(1, math.ceil((maxx - minx) * s))
         ch = max(1, math.ceil((maxy - miny) * s))
         tile = Image.new("RGBA", (cw + 2 * TILE_PAD, ch + 2 * TILE_PAD), (0, 0, 0, 0))
         draw = ImageDraw.Draw(tile)
 
-        # 白底多边形（tile 局部坐标）
-        ring = list(poly.exterior.coords)
-        local_pts = [((px - minx) * s + TILE_PAD, (py - miny) * s + TILE_PAD)
-                     for (px, py) in ring]
-        if len(local_pts) >= 3:
-            draw.polygon(local_pts, fill=(255, 255, 255, 255))
+        def _local(poly):
+            return [((px - minx) * s + TILE_PAD, (py - miny) * s + TILE_PAD)
+                    for (px, py) in poly.exterior.coords]
+
+        # 白底多边形铺满整个印刷区（含出血带）
+        print_pts = _local(print_poly)
+        if len(print_pts) >= 3:
+            draw.polygon(print_pts, fill=(255, 255, 255, 255))
 
         # 贴主体图：主体局部原点(0,0) 对应 poly 内位置 = (-minx,-miny)
+        # subject_image 含最多 MAX_BLEED 的越线素材，多余部分随后按印刷区裁掉
         subj = Image.fromarray(part.subject_image, mode="RGBA")
         if s != 1.0:
             subj = subj.resize(
@@ -62,8 +68,15 @@ def _build_tile(part, offset_px: float, smooth_iters: int = 0,
         sy_off = int(round((0 - miny) * s)) + TILE_PAD
         tile.alpha_composite(subj, (sx_off, sy_off))
 
-        # 洋红刀模线
-        _draw_polyline(draw, local_pts, g.DIECUT_RGB + (255,))
+        # 按印刷区裁剪：出血素材只保留当前出血深度
+        if len(print_pts) >= 3:
+            region = Image.new("L", tile.size, 0)
+            ImageDraw.Draw(region).polygon(print_pts, fill=255)
+            tile.putalpha(ImageChops.multiply(tile.getchannel("A"), region))
+
+        # 洋红刀模线：画在刀模轮廓上（切口处 = 切割线本身，图像越线出血在其外侧）
+        if not die_poly.is_empty:
+            _draw_polyline(draw, _local(die_poly), g.DIECUT_RGB + (255,))
         return tile, float(cw), float(ch)
 
     # —— 固定零件 ——

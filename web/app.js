@@ -258,35 +258,83 @@ function bufferOutline(polyline, offsetPx) {
   return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
 }
 
-// —— 切割半平面裁剪（与后端 border.halfplane_polygon 同几何）——
-// plane=[x1,y1,x2,y2]，保留侧 = 法线 n=(-dy,dx)/L 指向侧；边界向对侧平移 bleedPx（出血越线）
-function clipToHalfplane(ring, plane, bleedPx) {
+// —— 切割半平面裁剪（与后端 border.halfplane_polygon / clip_with_bleed 同几何）——
+// plane=[x1,y1,x2,y2]，保留侧 = 法线 n=(-dy,dx)/L 指向侧
+const CLIP_SCALE = 100;
+const CLIP_EPS = 0.5;   // 与后端 border._CLIP_EPS_PX 一致
+const _toPath = (pts) => pts.map(([x, y]) => ({ X: Math.round(x * CLIP_SCALE), Y: Math.round(y * CLIP_SCALE) }));
+const _fromPath = (p) => p.map(pt => [pt.X / CLIP_SCALE, pt.Y / CLIP_SCALE]);
+function _largestPath(sol, fallback) {
+  if (!sol || !sol.length) return fallback;
+  let best = sol[0], bestA = 0;
+  for (const p of sol) { const a = Math.abs(ClipperLib.Clipper.Area(p)); if (a > bestA) { bestA = a; best = p; } }
+  return _fromPath(best);
+}
+// 半平面矩形：保留侧 = n 指向侧；边界向对侧平移 shiftPx
+function _halfplaneQuad(plane, shiftPx) {
   const [x1, y1, x2, y2] = plane;
   const dx = x2 - x1, dy = y2 - y1;
   const L = Math.hypot(dx, dy) || 1;
-  const ux = dx / L, uy = dy / L;
-  const nx = -uy, ny = ux;
+  const ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
   const E = 20000;   // 远大于零件尺寸即可（clipper 整数域安全）
-  const bx1 = x1 - nx * bleedPx, by1 = y1 - ny * bleedPx;
-  const bx2 = x2 - nx * bleedPx, by2 = y2 - ny * bleedPx;
-  const quad = [
+  const bx1 = x1 - nx * shiftPx, by1 = y1 - ny * shiftPx;
+  const bx2 = x2 - nx * shiftPx, by2 = y2 - ny * shiftPx;
+  return [
     [bx1 - ux * E, by1 - uy * E],
     [bx2 + ux * E, by2 + uy * E],
     [bx2 + ux * E + nx * E, by2 + uy * E + ny * E],
     [bx1 - ux * E + nx * E, by1 - uy * E + ny * E],
   ];
-  const SCALE = 100;
-  const toPath = (pts) => pts.map(([x, y]) => ({ X: Math.round(x * SCALE), Y: Math.round(y * SCALE) }));
+}
+function _boolean(subjects, clips, type) {
   const c = new ClipperLib.Clipper();
-  c.AddPath(toPath(ring), ClipperLib.PolyType.ptSubject, true);
-  c.AddPath(toPath(quad), ClipperLib.PolyType.ptClip, true);
+  for (const s of subjects) c.AddPath(_toPath(s), ClipperLib.PolyType.ptSubject, true);
+  for (const cl of clips) c.AddPath(_toPath(cl), ClipperLib.PolyType.ptClip, true);
   const sol = new ClipperLib.Paths();
-  c.Execute(ClipperLib.ClipType.ctIntersection, sol,
-            ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
-  if (!sol.length) return ring;
-  let best = sol[0], bestA = 0;
-  for (const p of sol) { const a = Math.abs(ClipperLib.Clipper.Area(p)); if (a > bestA) { bestA = a; best = p; } }
-  return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
+  c.Execute(type, sol, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return sol;
+}
+// 按切割平面裁剪：刀模贴切线截断；bleedPx>0 时再并上「出血矩形凸台」
+// （块沿越线方向扫掠 bleed 后限制在切线~出血线之间，故出血与白边宽度解耦、切口保持直角）
+function clipToHalfplane(ring, plane, bleedPx) {
+  const p0 = _largestPath(_boolean([ring], [_halfplaneQuad(plane, 0)],
+                                   ClipperLib.ClipType.ctIntersection), ring);
+  if (bleedPx <= 0 || p0.length < 3) return p0;
+  const [x1, y1, x2, y2] = plane;
+  const L = Math.hypot(x2 - x1, y2 - y1) || 1;
+  const nx = -(y2 - y1) / L, ny = (x2 - x1) / L;
+  const STEPS = 3;
+  const sweep = [p0];
+  for (let k = 1; k <= STEPS; k++) {
+    const t = bleedPx * k / STEPS;
+    sweep.push(p0.map(([x, y]) => [x - nx * t, y - ny * t]));
+  }
+  const swept = _boolean(sweep, [], ClipperLib.ClipType.ctUnion);
+  // 带状区 = 出血半平面 ∩ 切线反向半平面，并与主块重叠 CLIP_EPS
+  // （仅共边时 clipper 并集不会合并，会返回两个独立环导致出血带被丢弃）
+  const band = _boolean([_halfplaneQuad(plane, bleedPx)],
+                        [_halfplaneQuad([x2, y2, x1, y1], CLIP_EPS)],
+                        ClipperLib.ClipType.ctIntersection);
+  const bulge = _boolean(swept.map(_fromPath), band.map(_fromPath),
+                         ClipperLib.ClipType.ctIntersection);
+  return _largestPath(_boolean([p0, ...bulge.map(_fromPath)], [],
+                               ClipperLib.ClipType.ctUnion), p0);
+}
+
+// —— 把主体图裁剪到印刷区（离屏 canvas）——
+// subject_image 携带最多 MAX_BLEED 的越线素材，按当前出血裁掉多余部分
+function clipImageToRing(el, ring) {
+  const c = document.createElement('canvas');
+  c.width = el.width || el.naturalWidth;
+  c.height = el.height || el.naturalHeight;
+  const ctx = c.getContext('2d');
+  ctx.beginPath();
+  ctx.moveTo(ring[0][0], ring[0][1]);
+  for (let i = 1; i < ring.length; i++) ctx.lineTo(ring[i][0], ring[i][1]);
+  ctx.closePath();
+  ctx.clip();
+  ctx.drawImage(el, 0, 0);
+  return c;
 }
 
 // —— Douglas-Peucker 简化（与后端 shapely simplify 等效，同容差保持同形）——
@@ -358,20 +406,26 @@ function buildGroupSync(p) {
       // 与后端 border.dieline_polygon 完全一致：先按档位简化再 Chaikin 切角
       die = chaikinSmooth(rdpSimplify(die, 0.8 + 0.6 * smoothIters), smoothIters);
     }
-    // 切割块：刀模与各半平面求交（切口平直 + 出血越线；先平滑后裁剪保切口锋利）
+    // 切割块：刀模线贴切线截断（bleed=0），印刷区再外扩出血带
+    // 图像携带越线素材，按印刷区裁剪 → 出血区印的是延续的画面而非白边
+    let printRing = die, dieRing = die, imgSrc = el;
     if (p.cut_planes && p.cut_planes.length) {
       const bleedPx = getBleedMm() * PIXEL_RATIO;
-      for (const plane of p.cut_planes) die = clipToHalfplane(die, plane, bleedPx);
-      if (die.length < 3) return null;
+      for (const plane of p.cut_planes) {
+        dieRing = clipToHalfplane(dieRing, plane, 0);
+        printRing = clipToHalfplane(printRing, plane, bleedPx);
+      }
+      if (dieRing.length < 3 || printRing.length < 3) return null;
+      imgSrc = clipImageToRing(el, printRing);
     }
-    const minx = die.reduce((a, q) => Math.min(a, q[0]), Infinity);
-    const miny = die.reduce((a, q) => Math.min(a, q[1]), Infinity);
+    const minx = printRing.reduce((a, q) => Math.min(a, q[0]), Infinity);
+    const miny = printRing.reduce((a, q) => Math.min(a, q[1]), Infinity);
     // 多边形点相对于 group 原点（物理坐标，scaleX/Y=1）
-    const ringPts = die.map(([x, y]) => ({ x: x - minx, y: y - miny }));
-    const white   = new fabric.Polygon(ringPts, { fill: '#fff', stroke: '', selectable: false, evented: false, objectCaching: false });
-    const dieLine = new fabric.Polygon(ringPts, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false });
+    const toPts = (ring) => ring.map(([x, y]) => ({ x: x - minx, y: y - miny }));
+    const white   = new fabric.Polygon(toPts(printRing), { fill: '#fff', stroke: '', selectable: false, evented: false, objectCaching: false });
+    const dieLine = new fabric.Polygon(toPts(dieRing), { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false });
     // 主体图 scaleX/Y=1，left/top 相对 group 原点（物理像素）
-    const img = new fabric.Image(el, {
+    const img = new fabric.Image(imgSrc, {
       left: -minx, top: -miny,
       scaleX: 1, scaleY: 1,
       selectable: false, evented: false,
@@ -385,8 +439,8 @@ function buildGroupSync(p) {
     // 白边小于主体边距时组包围盒=主体图（偏移 0）；白边更大时=刀模包围盒（偏移=minx-0.5，含描边半宽）
     grp.frameOffX = Math.min(0, minx - 0.5);
     grp.frameOffY = Math.min(0, miny - 0.5);
-    // 刀模环（主体帧坐标）：导出框内判定用（组 bbox 含透明主体图边距会偏大）
-    grp.dieRingF = die;
+    // 印刷区环（主体帧坐标）：导出框内判定用（组 bbox 含透明主体图边距会偏大）
+    grp.dieRingF = printRing;
     return grp;
   }
   // 固定白边模式：image_base64 + dieline_path

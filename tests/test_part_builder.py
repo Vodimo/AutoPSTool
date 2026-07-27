@@ -219,6 +219,64 @@ def test_cut_parametric_pieces_and_die_geometry():
     assert abs(iw - 2 * bleed_px) <= 4, f"重叠带宽应≈2×出血={2*bleed_px}px，实际 {iw:.1f}px"
 
 
+def test_cut_bleed_is_artwork_not_border():
+    """切割语义回归：刀模线固定在切割线上，出血区印的是延续的图像而非白边。"""
+    from app import border, geometry as gg, exporter
+    img = np.full((400, 400, 3), 255, np.uint8)
+    cv2.circle(img, (200, 200), 130, (200, 120, 0), -1)      # 蓝色圆盘
+    mask = np.zeros((400, 400), np.uint8)
+    cv2.circle(mask, (200, 200), 130, 255, -1)
+    part = pb.build_part(img, mask, offset_mm=2.0, part_id="w")
+
+    fh, fw = part.edit_mask.shape
+    pieces = pb.cut_part_parametric(part, (fw / 2, 0), (fw / 2, fh))
+    assert len(pieces) == 2
+    piece = pieces[0][0]
+
+    # 1) 印刷素材越过切线（供出血），真实主体仍截断在切线
+    assert piece.art_mask is not None, "切割块应带印刷素材掩膜"
+    em_x = np.where(piece.edit_mask.any(axis=0))[0]
+    am_x = np.where(piece.art_mask.any(axis=0))[0]
+    assert am_x.max() - em_x.max() >= gg.mm_to_px(gg.MAX_BLEED_MM) - 2, \
+        "印刷素材应越过切线约 MAX_BLEED"
+
+    # 2) 刀模多边形不随出血变化（刀模线就在切割线上）
+    off = gg.mm_to_px(2.0)
+    d0 = border.dieline_polygon(piece.subject_outline, off, cut_planes=piece.cut_planes,
+                                bleed_px=0)
+    for bleed_mm in (3.0, 6.0):
+        d = border.dieline_polygon(piece.subject_outline, off,
+                                   cut_planes=piece.cut_planes, bleed_px=0)
+        assert abs(d.bounds[2] - d0.bounds[2]) < 1e-6, "刀模轮廓不应随出血移动"
+
+    # 3) 渲染：刀模线外侧是主体色（出血带），且随出血线性加宽
+    def bleed_band_px(bleed_mm):
+        tile = exporter._build_tile(piece, off, 0, gg.mm_to_px(bleed_mm))[0]
+        arr = np.array(tile.convert("RGBA"))
+        row = arr[tile.height // 2]
+        die_x = max(i for i, px in enumerate(row)
+                    if px[3] > 128 and px[0] > 200 and px[1] < 60 and px[2] > 200)
+        # 刀模线右侧的不透明像素数 = 出血带宽度
+        return sum(1 for px in row[die_x + 1:] if px[3] > 128)
+
+    b0, b3, b6 = bleed_band_px(0.0), bleed_band_px(3.0), bleed_band_px(6.0)
+    assert b0 <= 2, f"出血 0 时刀模线外不应有内容，实际 {b0}px"
+    assert 25 <= b3 <= 35, f"出血 3mm 应约 30px，实际 {b3}px"
+    assert 55 <= b6 <= 65, f"出血 6mm 应约 60px，实际 {b6}px"
+
+    # 4) 出血带内容是主体色（蓝），不是白边
+    tile = exporter._build_tile(piece, off, 0, gg.mm_to_px(3.0))[0]
+    arr = np.array(tile.convert("RGBA"))
+    row = arr[tile.height // 2]
+    die_x = max(i for i, px in enumerate(row)
+                if px[3] > 128 and px[0] > 200 and px[1] < 60 and px[2] > 200)
+    band = [px for px in row[die_x + 3:] if px[3] > 128]
+    assert band, "出血带应有内容"
+    blue = sum(1 for px in band if px[2] > 120 and px[0] < 120)
+    assert blue > 0.8 * len(band), \
+        f"出血带应是延续的主体画面, 实际仅 {blue}/{len(band)} 为主体色"
+
+
 def test_materialize_parametric_then_cut():
     """参数化零件实体化后可正常切割，切出的两块为固定零件(无 subject_outline)。"""
     img, mask = _single_subject()

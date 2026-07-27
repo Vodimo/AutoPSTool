@@ -53,6 +53,9 @@ def smooth_ring(pts, iterations: int) -> list:
 
 
 _PLANE_EXTENT = 1e5   # 半平面矩形的延伸长度(px)，远大于任何零件尺寸即可
+# 出血带向保留侧多伸这一点点，使其与主块真正重叠而非仅共边——
+# 仅共边时布尔并集可能不合并（clipper 实测会返回两个独立环）
+_CLIP_EPS_PX = 0.5
 
 
 def halfplane_polygon(plane, bleed_px: float) -> Polygon:
@@ -112,9 +115,9 @@ def clip_with_bleed(poly: Polygon, plane, bleed_px: float) -> Polygon:
         _translate(p0, -nx * bleed_px * k / steps, -ny * bleed_px * k / steps)
         for k in range(1, steps + 1)
     ])
-    # 带状区：切线与出血线之间（= 保留侧半平面取反 ∩ 出血半平面）
+    # 带状区：切线与出血线之间（= 保留侧半平面取反 ∩ 出血半平面），并与主块重叠 EPS
     band = halfplane_polygon(plane, bleed_px).intersection(
-        halfplane_polygon([x2, y2, x1, y1], 0.0))
+        halfplane_polygon([x2, y2, x1, y1], _CLIP_EPS_PX))
     bulge = sweep.intersection(band)
     merged = _largest_polygon(unary_union([p0, bulge]))
     return merged if merged is not None else p0
