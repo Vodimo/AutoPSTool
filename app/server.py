@@ -202,14 +202,20 @@ def api_brush():
 
 
 # 排版后台任务状态（单用户单任务足够）：/api/nest async 模式写入，/api/nest_progress 轮询
-NEST_JOB = {"running": False, "progress": 1.0, "positions": None, "error": None}
+NEST_JOB = {"running": False, "progress": 1.0, "positions": None, "error": None,
+            "partial": None}
 
 
 def _run_nest(parts, spacing_mm, angle_steps, uniform_scale, offset_mm, page_px,
               smooth_iters, bleed_mm):
-    """后台线程执行排版，进度写入 NEST_JOB。"""
+    """后台线程执行排版，进度写入 NEST_JOB。partial 为已放置零件的中间位置，
+    前端轮询时实时挪动，让用户看到排版进行的过程。"""
     def cb(done, total):
         NEST_JOB["progress"] = done / max(1, total)
+        NEST_JOB["partial"] = [
+            {"id": p.id, "cx": p.cx, "cy": p.cy, "angle": p.rotation, "scale": p.scale}
+            for p in parts if p.cx is not None and p.cx >= 0
+        ]
 
     try:
         nesting.nest(
@@ -259,7 +265,8 @@ def api_nest():
     if run_async:
         if NEST_JOB["running"]:
             abort(409, description="已有排版任务在执行")
-        NEST_JOB.update({"running": True, "progress": 0.0, "positions": None, "error": None})
+        NEST_JOB.update({"running": True, "progress": 0.0, "positions": None,
+                         "error": None, "partial": None})
         threading.Thread(
             target=_run_nest,
             args=(parts, spacing_mm, angle_steps, uniform_scale, OFFSET_MM, page_px,
@@ -289,11 +296,13 @@ def api_nest():
 
 @app.route("/api/nest_progress", methods=["GET"])
 def api_nest_progress():
-    """轮询排版后台任务：{running, progress, positions?, error?}。
-    positions 仅在任务结束后返回一次性读取即可（保留至下次任务覆盖）。"""
+    """轮询排版后台任务：{running, progress, partial, positions?, error?}。
+    partial=已放置零件的中间位置（运行中实时更新，前端据此边排边动）；
+    positions 仅在任务结束后返回（保留至下次任务覆盖）。"""
     return jsonify({
         "running": NEST_JOB["running"],
         "progress": NEST_JOB["progress"],
+        "partial": NEST_JOB["partial"] if NEST_JOB["running"] else None,
         "positions": None if NEST_JOB["running"] else NEST_JOB["positions"],
         "error": NEST_JOB["error"],
     })
@@ -313,8 +322,8 @@ def api_set_smooth():
     global SMOOTH_ITERS
     d = _require_json("smooth_iters")
     val = int(d["smooth_iters"])
-    if val < 0 or val > 4:
-        abort(400, description="smooth_iters 必须在 0-4 之间")
+    if val < 0 or val > 6:
+        abort(400, description="smooth_iters 必须在 0-6 之间")
     SMOOTH_ITERS = val
     return jsonify({"ok": True, "smooth_iters": SMOOTH_ITERS})
 

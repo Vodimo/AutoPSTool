@@ -25,6 +25,12 @@ canvas.upperCanvasEl.addEventListener('mousedown', (e) => { if (e.button === 1) 
 canvas.upperCanvasEl.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 // 缩放始终锁宽高比（spec：拖角等比缩放）
 canvas.uniformScaling = true;
+// 原型级隐藏中边手柄：覆盖单零件、多选 ActiveSelection、以及一切重建路径。
+// 中边拖出的非等比缩放会与只按 scaleX 处理的快照/排版/导出不一致而变形
+fabric.Object.prototype._controlsVisibility = { ml: false, mr: false, mt: false, mb: false };
+
+// 视图缩放范围（支持超大自定义纸张也能"适应视图"看全）
+const ZOOM_MIN = 0.02, ZOOM_MAX = 8;
 
 // —— 模式提示横幅 ——
 // 显示/隐藏会改变 #wrap 高度，必须同步画布尺寸与 fabric 偏移，否则命中检测错位
@@ -129,7 +135,7 @@ function fitView() {
   const margin = 0.05;   // 5% 边距
   const scaleX = (cw * (1 - 2 * margin)) / bboxW;
   const scaleY = (ch * (1 - 2 * margin)) / bboxH;
-  const zoom = Math.max(0.1, Math.min(8, Math.min(scaleX, scaleY)));
+  const zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.min(scaleX, scaleY)));
 
   // 使 bbox 中心对准画布中心
   const bboxCx = (minX + maxX) / 2 * zoom;
@@ -149,7 +155,7 @@ canvas.on('mouse:wheel', function (opt) {
   const delta = e.deltaY;
   let zoom = canvas.getZoom();
   zoom *= Math.pow(0.999, delta);
-  zoom = Math.max(0.1, Math.min(8, zoom));
+  zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
   canvas.zoomToPoint({ x: e.offsetX, y: e.offsetY }, zoom);
   e.preventDefault();
   e.stopPropagation();
@@ -166,6 +172,11 @@ window.addEventListener('keydown', (e) => {
     const tag = document.activeElement && document.activeElement.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
     spaceDown = true;
+    // 空格按下即全局跳过对象命中：fabric 在派发 mouse:down 之前就会开始
+    // 拖拽命中的对象——事后取消 selectable 已太迟，会出现零件被拖走/抖动
+    canvas.skipTargetFind = true;
+    canvas.selection = false;
+    canvas.defaultCursor = 'grab';
     // 阻止空格导致页面滚动
     e.preventDefault();
   }
@@ -173,10 +184,10 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => {
   if (e.code === 'Space') {
     spaceDown = false;
-    if (isPanning) {
-      isPanning = false;
-      canvas.selection = true;
-    }
+    canvas.skipTargetFind = false;
+    canvas.defaultCursor = 'default';
+    if (!cutMode && !brushMode) canvas.selection = true;
+    if (isPanning) isPanning = false;
   }
 });
 
@@ -186,9 +197,6 @@ canvas.on('mouse:down', function (opt) {
   if (spaceDown || e.button === 1) {
     isPanning = true;
     panStart = { x: e.clientX, y: e.clientY };
-    canvas.selection = false;
-    // 禁止对象被拖拽
-    canvas.getObjects().forEach(o => { o.__prevSelectable = o.selectable; o.selectable = false; });
     e.preventDefault();
   }
 });
@@ -211,14 +219,8 @@ canvas.on('mouse:move', function (opt) {
 canvas.on('mouse:up', function (opt) {
   if (isPanning) {
     isPanning = false;
-    if (!spaceDown) canvas.selection = true;
-    // 恢复对象可选状态
-    canvas.getObjects().forEach(o => {
-      if (typeof o.__prevSelectable !== 'undefined') {
-        o.selectable = o.__prevSelectable;
-        delete o.__prevSelectable;
-      }
-    });
+    // 中键平移结束（空格平移由 keyup 统一恢复状态）
+    if (!spaceDown && !cutMode && !brushMode) canvas.selection = true;
   }
   panStart = null;
 });
@@ -287,6 +289,42 @@ function clipToHalfplane(ring, plane, bleedPx) {
   return best.map(pt => [pt.X / SCALE, pt.Y / SCALE]);
 }
 
+// —— Douglas-Peucker 简化（与后端 shapely simplify 等效，同容差保持同形）——
+// 平滑前先简化：把轮廓上细碎抖动合并成长边，Chaikin 再把长边交角切圆，
+// 才能得到大弧顺滑的效果；只 Chaikin 不简化时细抖动会被保留成"弯弯折折"。
+function rdpSimplify(pts, tol) {
+  if (pts.length < 4) return pts;
+  const sqTol = tol * tol;
+  const sqSegDist = (p, a, b) => {
+    let x = a[0], y = a[1], dx = b[0] - x, dy = b[1] - y;
+    if (dx !== 0 || dy !== 0) {
+      const t = ((p[0] - x) * dx + (p[1] - y) * dy) / (dx * dx + dy * dy);
+      if (t > 1) { x = b[0]; y = b[1]; }
+      else if (t > 0) { x += dx * t; y += dy * t; }
+    }
+    dx = p[0] - x; dy = p[1] - y;
+    return dx * dx + dy * dy;
+  };
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [first, last] = stack.pop();
+    let maxSq = 0, idx = -1;
+    for (let i = first + 1; i < last; i++) {
+      const sq = sqSegDist(pts[i], pts[first], pts[last]);
+      if (sq > maxSq) { maxSq = sq; idx = i; }
+    }
+    if (maxSq > sqTol && idx > 0) {
+      keep[idx] = 1;
+      stack.push([first, idx], [idx, last]);
+    }
+  }
+  const out = [];
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i]);
+  return out.length >= 3 ? out : pts;
+}
+
 // —— Chaikin 切角平滑（与后端 border.smooth_ring 同算法，保证碰撞/渲染同形）——
 function chaikinSmooth(ring, iterations) {
   let pts = ring;
@@ -316,7 +354,10 @@ function buildGroupSync(p) {
       ? p.subject_poly : parseDToPolyline(p.subject_outline);
     let die = bufferOutline(outline, borderPx);   // 物理像素
     if (die.length < 3) return null;
-    if (smoothIters > 0) die = chaikinSmooth(die, smoothIters);
+    if (smoothIters > 0) {
+      // 与后端 border.dieline_polygon 完全一致：先按档位简化再 Chaikin 切角
+      die = chaikinSmooth(rdpSimplify(die, 0.8 + 0.6 * smoothIters), smoothIters);
+    }
     // 切割块：刀模与各半平面求交（切口平直 + 出血越线；先平滑后裁剪保切口锋利）
     if (p.cut_planes && p.cut_planes.length) {
       const bleedPx = getBleedMm() * PIXEL_RATIO;
@@ -340,8 +381,6 @@ function buildGroupSync(p) {
       // 逐像素命中：主体图带 60px 透明边距，默认矩形命中会点空白误选零件
       perPixelTargetFind: true,
     });
-    // 只留四角手柄：中边手柄会产生非等比缩放（快照/排版/导出只按 scaleX 处理会变形）
-    grp.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
     // 组包围盒左上 → 主体帧原点的偏移（切割坐标换算用）：
     // 白边小于主体边距时组包围盒=主体图（偏移 0）；白边更大时=刀模包围盒（偏移=minx-0.5，含描边半宽）
     grp.frameOffX = Math.min(0, minx - 0.5);
@@ -357,12 +396,10 @@ function buildGroupSync(p) {
     const ring = parseDToPolyline(p.dieline_path).map(([x, y]) => ({ x, y }));
     if (ring.length >= 2) children.push(new fabric.Polygon(ring, { fill: '', stroke: '#FF00FF', strokeWidth: 1, selectable: false, evented: false, objectCaching: false }));
   }
-  const grp = new fabric.Group(children, {
+  return new fabric.Group(children, {
     partId: p.id, cornerSize: 8, transparentCorners: false,
     perPixelTargetFind: true,
   });
-  grp.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
-  return grp;
 }
 
 // 加载零件图片元素（每个零件只一次），存入 imgElById
@@ -373,8 +410,24 @@ function loadPartImage(p) {
   });
 }
 
-// 导入计数器（控制初始散落位置，放在纸框右侧）
-let importCounter = 0;
+// —— 新零件摆放：在纸框右侧的"暂存区"按网格找空位 ——
+// 不再用全局递增计数器（删掉零件后仍会一直往下堆，越导越远）
+const STAGE_GAP = 40;                 // 暂存区与纸框的间隔
+function findFreeSpot(w, h) {
+  const step = Math.max(120, Math.min(400, Math.max(w, h) + 30));
+  const x0 = pageWpx + STAGE_GAP;
+  const occupied = [...objById.values()].map(o => o.getBoundingRect(true));
+  const hit = (x, y) => occupied.some(b =>
+    !(x + w <= b.left || x >= b.left + b.width || y + h <= b.top || y >= b.top + b.height));
+  // 逐列（每列 8 行）向右扫描找不重叠的位置
+  for (let col = 0; col < 40; col++) {
+    for (let row = 0; row < 8; row++) {
+      const x = x0 + col * step, y = 20 + row * step;
+      if (!hit(x, y)) return { x, y };
+    }
+  }
+  return { x: x0, y: 20 };
+}
 
 async function addPart(p, x, y) {
   partData.set(p.id, p);
@@ -394,9 +447,11 @@ const LOCK_STROKE = '#F97316';   // 锁角零件刀模描边（橙，仅画布�
 function updateLockVisual(o) {
   const locked = !!o.locked;
   // 组内有描边的 Polygon 即刀模线（参数化第 3 个子对象 / 固定第 2 个）
+  // 锁角时描边加粗到 4px，远看也一眼可辨
   for (const ch of (o._objects || [])) {
     if (ch.type === 'polygon' && ch.stroke) {
-      ch.set({ stroke: locked ? LOCK_STROKE : DIE_STROKE });
+      ch.set({ stroke: locked ? LOCK_STROKE : DIE_STROKE,
+               strokeWidth: locked ? 4 : 1 });
     }
   }
   o.dirty = true;   // 组有缓存位图，需标脏重绘
@@ -686,12 +741,15 @@ document.getElementById('btn-import').onclick = () => document.getElementById('f
 document.getElementById('file').onchange = async (e) => {
   const files = Array.from(e.target.files);
   if (!files.length) return;
-  setStatus('抠图中…');
   const total = files.length;
+  // 醒目提示：横幅告知正在抠图（AI 抠图较慢，只有细进度条容易以为没反应）
+  showBanner(`⏳ AI 抠图中… 0/${total} 张（首次运行需加载模型，请稍候）`);
+  setStatus('抠图中…');
   try {
     for (let fileIdx = 0; fileIdx < total; fileIdx++) {
       const f = files[fileIdx];
       showProgress(fileIdx / total);
+      showBanner(`⏳ AI 抠图中… ${fileIdx + 1}/${total} 张：${f.name}`);
       const dataUrl = await new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result);
@@ -700,16 +758,12 @@ document.getElementById('file').onchange = async (e) => {
       const r = await api('/api/segment', { image_base64: dataUrl });
       const { parts } = await r.json();
       showProgress((fileIdx + 0.7) / total);
-      let i = 0;
+      showBanner(`📦 摆放零件… ${fileIdx + 1}/${total} 张，分离出 ${parts.length} 个`);
       for (const p of parts) {
-        const col = (importCounter + i) % 5;
-        const row = Math.floor((importCounter + i) / 5);
-        const x = 20 + col * 320;
-        const y = 20 + row * 320;
-        await addPart(p, x, y);
-        i++;
+        // 在纸框右侧暂存区找空位（与已有零件不重叠），避免越导越远
+        const spot = findFreeSpot(p.w || 300, p.h || 300);
+        await addPart(p, spot.x, spot.y);
       }
-      importCounter += parts.length;
       setStatus(`已导入 ${fileIdx + 1}/${total} 张，分离出 ${parts.length} 个零件`);
       showProgress((fileIdx + 1) / total);
     }
@@ -720,6 +774,7 @@ document.getElementById('file').onchange = async (e) => {
     setStatus('抠图失败: ' + err.message);
   } finally {
     hideProgress();
+    if (!cutMode && !brushMode) hideBanner();
   }
   e.target.value = '';
 };
@@ -999,7 +1054,7 @@ document.getElementById('btn-export').onclick = async () => {
 };
 
 // —— 删除选中（支持多选；只移出画布和 objById，保留 partData/imgElById 供 undo 重建）——
-document.getElementById('btn-delete').onclick = () => {
+function deleteSelected() {
   const t = canvas.getActiveObject();
   if (!t) return;
   const targets = (t.type === 'activeSelection' || t.type === 'activeselection')
@@ -1014,8 +1069,21 @@ document.getElementById('btn-delete').onclick = () => {
     // partData/imgElById 保留，不删
   }
   canvas.requestRenderAll();
+  setStatus(`已删除 ${parts.length} 个零件`);
   pushSnapshot();
-};
+}
+document.getElementById('btn-delete').onclick = deleteSelected;
+
+// Delete / Backspace 键删除选中零件（输入框内不拦截）
+window.addEventListener('keydown', (e) => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (cutMode || brushMode) return;   // 模式中不误删
+    e.preventDefault();
+    deleteSelected();
+  }
+});
 
 // 排版精度滑块数值联动
 const nestPrecisionEl = document.getElementById('nest-precision');
@@ -1061,22 +1129,45 @@ document.getElementById('btn-tidy').onclick = async () => {
           const s = await pr.json();
           if (s.error) { clearInterval(timer); reject(new Error(s.error)); return; }
           showProgress(Math.max(0.02, s.progress));
+          // 中间状态：已放好的零件边算边挪到位，用户能看到排版在进行
+          if (s.running && s.partial) {
+            for (const pos of s.partial) {
+              const o = objById.get(pos.id);
+              if (!o || pos.cx < 0) continue;
+              o.set({ scaleX: pos.scale, scaleY: pos.scale, angle: pos.angle });
+              o.setPositionByOrigin(new fabric.Point(pos.cx, pos.cy), 'center', 'center');
+              o.setCoords();
+            }
+            setStatus(`排版中… 已放置 ${s.partial.length}/${items.length}`);
+            canvas.requestRenderAll();
+          }
           if (!s.running && s.positions) { clearInterval(timer); resolve(s.positions); }
         } catch (e) { clearInterval(timer); reject(e); }
       }, POLL_MS);
     });
-    // 放不下的零件按 spec「自然留在纸框外」：排到纸框右侧一列，避免留在框内与已排零件重叠
-    let outIdx = 0, outTop = 20;
+    // 放不下的零件按 spec「自然留在纸框外」：在纸框右侧整齐紧凑地列队
+    // （按旋转后的实际包围盒逐行排布，行宽取该批最宽者，不再乱堆）
+    const unplaced = positions.filter(p => p.cx < 0)
+      .map(p => objById.get(p.id)).filter(Boolean);
+    let outIdx = 0;
+    if (unplaced.length) {
+      const GAP = 20;
+      let colX = pageWpx + STAGE_GAP, colW = 0, y = 20;
+      for (const o of unplaced) {
+        const br = o.getBoundingRect(true);   // 含旋转的实际占位
+        if (y + br.height > pageHpx && y > 20) { colX += colW + GAP; colW = 0; y = 20; }
+        // getBoundingRect 是 bbox，left/top 需按 bbox 与原点的偏移回推
+        o.set({ left: o.left + (colX - br.left), top: o.top + (y - br.top) });
+        o.setCoords();
+        y += br.height + GAP;
+        colW = Math.max(colW, br.width);
+        outIdx++;
+      }
+    }
     for (const pos of positions) {
       const o = objById.get(pos.id);
       if (!o) continue;
-      if (pos.cx < 0) {
-        o.set({ left: pageWpx + 60, top: outTop });
-        o.setCoords();
-        outTop += o.getScaledHeight() + 20;
-        outIdx++;
-        continue;
-      }
+      if (pos.cx < 0) continue;   // 已在上面整齐列队
       // 应用后端返回的缩放和角度（统一缩放时 scale 可能变化）
       o.set({ scaleX: pos.scale, scaleY: pos.scale, angle: pos.angle });
       // 按视觉中心物理坐标定位（与导出契约一致）
@@ -1098,7 +1189,8 @@ document.getElementById('btn-fit').onclick = fitView;
 // 切割模式（Phase 5 Task 2）
 // ============================================================
 
-// 出血控件：mm/px 互换，调用后端 /api/set_bleed
+// 出血控件：滑块 + 数值 + mm/px 互换，调用后端 /api/set_bleed
+const bleedRng  = document.getElementById('bleed-range');   // 0-100 → 0-10mm（步进 0.1mm）
 const bleedNum  = document.getElementById('bleed-num');
 const bleedUnit = document.getElementById('bleed-unit');
 
@@ -1106,20 +1198,41 @@ function getBleedMm() {
   const v = parseFloat(bleedNum.value) || 0;
   return bleedUnit.value === 'px' ? v / PIXEL_RATIO : v;
 }
-function onBleedChange() {
-  const mm = getBleedMm();
-  api('/api/set_bleed', { bleed_mm: mm }).catch(() => {});
-  // 出血影响切割块刀模的越线边界：重建所有带切割平面的零件
+// 只重建切割块（不同步后端、不推快照）：滑块拖动时实时预览
+function refreshCutPieces() {
   canvas.discardActiveObject();
   for (const [id] of objById) {
     const pd = partData.get(id);
     if (pd && pd.kind === 'parametric' && pd.cut_planes && pd.cut_planes.length) rebuildPart(id);
   }
   canvas.requestRenderAll();
+}
+function onBleedChange() {
+  const mm = getBleedMm();
+  api('/api/set_bleed', { bleed_mm: mm }).catch(() => {});
+  refreshCutPieces();
   pushSnapshot();
 }
+// 滑块拖动：实时重绘；松手才同步后端+推快照
+bleedRng.oninput = () => {
+  const mm = parseInt(bleedRng.value, 10) / 10;
+  bleedNum.value = bleedUnit.value === 'px' ? Math.round(mm * PIXEL_RATIO) : mm.toFixed(1);
+  refreshCutPieces();
+};
+bleedRng.onchange = onBleedChange;
+bleedNum.oninput = () => {
+  bleedRng.value = Math.min(100, Math.round(getBleedMm() * 10));
+  refreshCutPieces();
+};
 bleedNum.onchange  = onBleedChange;
-bleedUnit.onchange = onBleedChange;
+bleedUnit.onchange = () => {
+  // 单位切换只换算显示值，出血物理量不变
+  const cur = parseFloat(bleedNum.value) || 0;
+  if (bleedUnit.value === 'px') bleedNum.value = Math.round(cur * PIXEL_RATIO);
+  else bleedNum.value = (cur / PIXEL_RATIO).toFixed(1);
+  bleedRng.value = Math.min(100, Math.round(getBleedMm() * 10));
+  onBleedChange();
+};
 
 // 切割状态变量
 // 状态机（消除"选目标"与"画线"的左键歧义）：
@@ -1142,10 +1255,13 @@ function setPartsEvented(flag) {
 }
 
 // 由 cutP1/P2 重建切割线；interactive=true 时线可拖动（暂存态）
+// 线宽/虚线段随视图缩放反缩，任何缩放级别下屏幕观感一致且醒目
 function renderCutLine(interactive) {
   if (cutLine) canvas.remove(cutLine);
+  const k = 1 / Math.max(0.02, canvas.getZoom());
   cutLine = new fabric.Line([cutP1.x, cutP1.y, cutP2.x, cutP2.y], {
-    stroke: '#FF00FF', strokeWidth: 2, strokeDashArray: [6, 6],
+    stroke: '#FF00FF', strokeWidth: 3 * k, strokeDashArray: [10 * k, 7 * k],
+    shadow: new fabric.Shadow({ color: 'rgba(255,255,255,0.9)', blur: 4 * k }),
     selectable: !!interactive, evented: !!interactive,
     hasControls: false, hasBorders: false, lockRotation: true,
     hoverCursor: 'move', excludeFromExport: true, objectCaching: false,
@@ -1169,12 +1285,14 @@ function renderCutLine(interactive) {
 // 端点手柄：白底洋红圆，可拖动调整线端点
 function makeCutHandles() {
   removeCutHandles();
-  const r = 6 / Math.max(0.2, canvas.getZoom());   // 屏幕上约 6px
+  const k = 1 / Math.max(0.02, canvas.getZoom());
+  const r = 9 * k;   // 屏幕上约 9px，够大好抓
   [cutP1, cutP2].forEach((pt, idx) => {
     const h = new fabric.Circle({
       left: pt.x, top: pt.y, radius: r,
       originX: 'center', originY: 'center',
-      fill: '#fff', stroke: '#FF00FF', strokeWidth: 2 / Math.max(0.2, canvas.getZoom()),
+      fill: '#fff', stroke: '#FF00FF', strokeWidth: 3 * k,
+      shadow: new fabric.Shadow({ color: 'rgba(0,0,0,0.35)', blur: 4 * k }),
       hasControls: false, hasBorders: false,
       hoverCursor: 'crosshair', excludeFromExport: true, objectCaching: false,
     });
@@ -1204,17 +1322,38 @@ function removeCutHandles() {
   cutHandles = [];
 }
 
+// 目标聚焦视觉：选定目标后其他零件半透明置底，目标不透明置顶且带手柄隐藏
+// （切割模式里零件完全不可变换，避免"还能移动旋转"的怪异感）
+function applyCutFocus() {
+  for (const o of objById.values()) {
+    if (cutTarget && o !== cutTarget) {
+      o.set({ opacity: 0.25 });
+    } else {
+      o.set({ opacity: 1 });
+    }
+  }
+  if (cutTarget) canvas.bringToFront(cutTarget);
+  if (pageRect) canvas.sendToBack(pageRect);
+}
+function clearCutFocus() {
+  for (const o of objById.values()) o.set({ opacity: 1 });
+}
+
 // 切割模式：进入/退出
 function enterCutMode() {
   // 若处于修补模式，先退出（两模式互斥，避免事件处理器叠加）
   if (brushMode) exitBrushMode();
   cutMode = true;
   document.getElementById('btn-cut').classList.add('active');
-  // 禁止所有零件拖拽（保留可选），禁止空白框选
+  // 切割模式内零件完全不可变换（移动/缩放/旋转全禁），只做"选目标"用
   canvas.getObjects().forEach(o => {
     if (o.partId) {
       o.lockMovementX = true;
       o.lockMovementY = true;
+      o.lockRotation = true;
+      o.lockScalingX = true;
+      o.lockScalingY = true;
+      o.hasControls = false;
     }
   });
   canvas.selection = false;
@@ -1223,29 +1362,37 @@ function enterCutMode() {
   if (a && a.partId && !a.locked && Math.abs(a.angle || 0) < 0.5) {
     cutTarget = a;
     setPartsEvented(false);
+    applyCutFocus();
     showBanner('✂️ 画切割线：左键点起点 → 移动 → 左键点终点（Esc 重新选目标）');
-    setStatus('目标已选中，左键点切割线起点（任意位置）');
+    setStatus('目标已选中（其他零件已淡出），左键点切割线起点');
   } else {
     showBanner('✂️ 切割模式：先点选一个目标零件（Esc 退出）');
     setStatus('切割：先点选一个目标零件');
   }
+  canvas.requestRenderAll();
 }
 
 function exitCutMode() {
   cutMode = false;
   document.getElementById('btn-cut').classList.remove('active');
   cancelCutLine();
-  // 恢复所有零件可拖拽/可命中
+  // 恢复所有零件可拖拽/可变换/可命中
   canvas.getObjects().forEach(o => {
     if (o.partId) {
       o.lockMovementX = false;
       o.lockMovementY = false;
+      o.lockRotation = false;
+      o.lockScalingX = false;
+      o.lockScalingY = false;
+      o.hasControls = true;
     }
   });
   setPartsEvented(true);
+  clearCutFocus();
   canvas.selection = true;
   cutTarget = null;
   hideBanner();
+  canvas.discardActiveObject();
   canvas.requestRenderAll();
   setStatus('已退出切割模式');
 }
@@ -1296,6 +1443,7 @@ window.addEventListener('keydown', (e) => {
     } else if (cutTarget) {
       cutTarget = null;
       setPartsEvented(true);
+      clearCutFocus();
       canvas.discardActiveObject();
       canvas.requestRenderAll();
       showBanner('✂️ 切割模式：先点选一个目标零件（Esc 退出）');
@@ -1344,12 +1492,15 @@ canvas.on('mouse:down', function (opt) {
         return;
       }
       cutTarget = target;
-      canvas.setActiveObject(target);
       // 零件对鼠标透明：之后的左键全部用于画线，不会误选其他零件
       setPartsEvented(false);
+      // 目标聚焦：其他零件淡出置底，目标醒目（不再靠选中框表达"已选"，
+      // 因为点空白会取消选中框，让用户误以为目标丢了）
+      applyCutFocus();
+      canvas.discardActiveObject();
       canvas.requestRenderAll();
       showBanner('✂️ 画切割线：左键点起点 → 移动 → 左键点终点（Esc 重新选目标）');
-      setStatus('目标已选中，左键点切割线起点（任意位置）');
+      setStatus('目标已选中（其他零件已淡出），左键点切割线起点');
     } else {
       setStatus('切割：先点选一个目标零件');
     }
@@ -1464,15 +1615,49 @@ const brushSizeLbl = document.getElementById('brush-size-label');
 brushSizeEl.oninput = () => { brushSizeLbl.textContent = brushSizeEl.value; };
 
 // 修补模式状态变量
-// 交互流程：可多笔累积涂抹（同一零件），Enter 一次性应用，Esc 取消笔迹（再 Esc 退出模式）
+// 交互流程（实时）：进入模式 → 画笔光标跟随鼠标 → 每涂一笔松手立即应用并看到效果
+// → 不满意 Ctrl+Z 逐笔撤销 → Esc / B 退出模式。零件在模式内完全不可选中拖动。
 let brushMode     = false;   // 是否处于修补画笔模式
 let brushPainting = false;   // 当前是否正在涂抹（mouse down 中）
-let brushTarget   = null;    // 累积笔迹的目标零件（第一笔锁定）
-let brushCanvas   = null;    // 离屏 canvas（subject_image 像素尺寸，累积多笔）
+let brushTarget   = null;    // 当前笔画的目标零件（每笔独立）
+let brushCanvas   = null;    // 离屏 canvas（subject_image 像素尺寸，单笔）
 let brushCtx      = null;    // 对应 2D 上下文
-let brushOverlays = [];      // 已完成笔画的预览折线（fabric.Polyline）
 let brushCurPts   = [];      // 当前笔画的场景坐标点
-let brushCurLine  = null;    // 当前笔画的临时折线对象
+let brushCurLine  = null;    // 当前笔画的临时预览折线
+let brushCursor   = null;    // 画笔圆形光标（跟随鼠标）
+let brushBusy     = false;   // 正在提交后端（避免并发）
+
+// 画笔光标：圆圈随鼠标移动，半径=笔刷大小/2（场景 px，随视图缩放显示）
+function ensureBrushCursor() {
+  if (brushCursor) return;
+  brushCursor = new fabric.Circle({
+    left: -9999, top: -9999, radius: 1,
+    originX: 'center', originY: 'center',
+    fill: 'rgba(255,255,255,0.15)',
+    stroke: '#0ea5e9', strokeWidth: 1,
+    selectable: false, evented: false,
+    excludeFromExport: true, objectCaching: false,
+  });
+  canvas.add(brushCursor);
+}
+function updateBrushCursor(ptr) {
+  if (!brushCursor) return;
+  const mode = document.getElementById('brush-mode').value;
+  const k = 1 / Math.max(0.02, canvas.getZoom());
+  brushCursor.set({
+    left: ptr.x, top: ptr.y,
+    radius: parseInt(brushSizeEl.value, 10) / 2,
+    stroke: mode === 'add' ? '#16a34a' : '#dc2626',
+    fill: mode === 'add' ? 'rgba(22,163,74,0.15)' : 'rgba(220,38,38,0.15)',
+    strokeWidth: 2 * k,
+  });
+  brushCursor.setCoords();
+  canvas.bringToFront(brushCursor);
+  canvas.requestRenderAll();
+}
+function removeBrushCursor() {
+  if (brushCursor) { canvas.remove(brushCursor); brushCursor = null; }
+}
 
 // 进入修补画笔模式
 function enterBrushMode() {
@@ -1480,41 +1665,54 @@ function enterBrushMode() {
   if (cutMode) exitCutMode();
   brushMode = true;
   document.getElementById('btn-brush').classList.add('active');
-  // 锁住所有零件拖拽（和 cutMode 一样）
+  // 零件在修补模式内完全不可选中/拖动/变换（只作为涂抹底图）
+  canvas.discardActiveObject();
   canvas.getObjects().forEach(o => {
-    if (o.partId) { o.lockMovementX = true; o.lockMovementY = true; }
+    if (o.partId) {
+      o.__prevSel = o.selectable;
+      o.selectable = false;
+      o.hasControls = false;
+    }
   });
-  // 禁止框选
   canvas.selection = false;
-  showBanner('🖌️ 修补模式：在零件主体上涂抹（可多笔，加/擦见工具栏）· Enter 应用 · Esc 取消');
-  setStatus('修补：在零件上涂抹（可多笔），Enter 应用 / Esc 取消');
+  canvas.defaultCursor = 'none';    // 用画笔圆圈代替系统光标
+  canvas.hoverCursor = 'none';
+  ensureBrushCursor();
+  showBanner('🖌️ 修补模式：在零件上涂抹即刻生效（工具栏切换 加/擦）· Ctrl+Z 撤销 · Esc 退出');
+  setStatus('修补：涂抹即时生效，Ctrl+Z 可逐笔撤销');
+  canvas.requestRenderAll();
 }
 
 // 退出修补画笔模式
 function exitBrushMode() {
   brushMode = false;
   document.getElementById('btn-brush').classList.remove('active');
-  // 恢复零件拖拽
+  // 恢复零件可选中/可变换
   canvas.getObjects().forEach(o => {
-    if (o.partId) { o.lockMovementX = false; o.lockMovementY = false; }
+    if (o.partId) {
+      o.selectable = (typeof o.__prevSel === 'boolean') ? o.__prevSel : true;
+      delete o.__prevSel;
+      o.hasControls = true;
+    }
   });
   canvas.selection = true;
-  clearBrushStrokes();
+  canvas.defaultCursor = 'default';
+  canvas.hoverCursor = 'move';
+  clearBrushStroke();
+  removeBrushCursor();
   hideBanner();
+  canvas.requestRenderAll();
   setStatus('已退出修补模式');
 }
 
-// 清除累积笔迹：预览折线 + 离屏画布 + 目标锁定
-function clearBrushStrokes() {
-  for (const o of brushOverlays) canvas.remove(o);
-  brushOverlays = [];
+// 清除当前笔画的临时状态
+function clearBrushStroke() {
   if (brushCurLine) { canvas.remove(brushCurLine); brushCurLine = null; }
   brushCurPts   = [];
   brushPainting = false;
   brushTarget   = null;
   brushCanvas   = null;
   brushCtx      = null;
-  canvas.requestRenderAll();
 }
 
 // 「修补」按钮切换
@@ -1533,21 +1731,18 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// Enter 应用累积笔迹 / Esc 取消笔迹（无笔迹时 Esc 退出模式）
+// Esc 退出修补模式（实时模式无待确认笔迹）
 window.addEventListener('keydown', (e) => {
   if (!brushMode) return;
-  if (e.key === 'Enter' && brushTarget && !brushPainting) {
-    applyBrushStrokes();
-    return;
-  }
-  if (e.key === 'Escape' && !brushPainting) {
-    if (brushTarget) {
-      clearBrushStrokes();
-      setStatus('已取消笔迹');
-    } else {
-      exitBrushMode();
-    }
-  }
+  if (e.key === 'Escape' && !brushPainting) exitBrushMode();
+});
+
+// 加/擦切换、笔刷大小变化时刷新光标外观
+document.getElementById('brush-mode').addEventListener('change', () => {
+  if (brushMode && brushCursor) updateBrushCursor(brushCursor.getCenterPoint());
+});
+brushSizeEl.addEventListener('input', () => {
+  if (brushMode && brushCursor) updateBrushCursor(brushCursor.getCenterPoint());
 });
 
 // 计算 subject_image 像素坐标（场景物理坐标 → subject_image px）
@@ -1624,14 +1819,20 @@ function rebuildCurStrokeLine() {
   canvas.requestRenderAll();
 }
 
-// mouse:down — 修补画笔：开始一笔（首笔锁定目标零件并建离屏画布）
-canvas.on('mouse:down', function (opt) {
-  if (!brushMode || isPanning) return;
+// 命中零件：修补模式下零件 selectable=false，opt.target 不可靠，
+// 用 findTarget(skipGroup) 主动查（perPixelTargetFind 仍生效，透明处不命中）
+function brushHitPart(opt) {
+  const t = canvas.findTarget(opt.e, true);
+  return (t && t.partId) ? t : null;
+}
 
-  const target = opt.target;
-  // 必须命中一个零件 group（参数化）
-  if (!target || !target.partId) {
-    setStatus('修补：请在零件主体上涂抹');
+// mouse:down — 修补画笔：开始一笔
+canvas.on('mouse:down', function (opt) {
+  if (!brushMode || isPanning || brushBusy) return;
+
+  const target = brushHitPart(opt);
+  if (!target) {
+    setStatus('修补：请在零件主体或白边上涂抹');
     return;
   }
   const pd = partData.get(target.partId);
@@ -1644,46 +1845,37 @@ canvas.on('mouse:down', function (opt) {
     setStatus('修补：请先按 L 将零件角度归零再修补');
     return;
   }
-  // 已有未应用笔迹时只允许继续涂同一零件
-  if (brushTarget && target !== brushTarget) {
-    setStatus('已有未应用的笔迹：先按 Enter 应用或 Esc 取消，再修补其他零件');
-    return;
-  }
 
-  if (!brushTarget) {
-    // 首笔：锁定目标并初始化离屏 canvas（subject_image 原生像素尺寸）
-    brushTarget = target;
-    brushCanvas = document.createElement('canvas');
-    brushCanvas.width  = pd.w;
-    brushCanvas.height = pd.h;
-    brushCtx = brushCanvas.getContext('2d');
-  }
+  // 每笔独立：锁定本笔目标并新建离屏 canvas（subject_image 原生像素尺寸）
+  brushTarget = target;
+  brushCanvas = document.createElement('canvas');
+  brushCanvas.width  = pd.w;
+  brushCanvas.height = pd.h;
+  brushCtx = brushCanvas.getContext('2d');
   brushPainting = true;
   brushCurPts = [];
   brushAddPoint(canvas.getPointer(opt.e));
 });
 
-// mouse:move — 修补画笔：延续当前笔画
+// mouse:move — 延续当前笔画；未按下时只更新画笔光标位置
 canvas.on('mouse:move', function (opt) {
-  if (!brushMode || !brushPainting || isPanning) return;
-  brushAddPoint(canvas.getPointer(opt.e));
+  if (!brushMode || isPanning) return;
+  const ptr = canvas.getPointer(opt.e);
+  updateBrushCursor(ptr);
+  if (!brushPainting) return;
+  brushAddPoint(ptr);
 });
 
-// mouse:up — 修补画笔：结束当前笔画（不提交；Enter 统一应用）
+// mouse:up — 松手即刻提交本笔到后端并替换零件（实时看到效果）
 canvas.on('mouse:up', function () {
   if (!brushMode || !brushPainting) return;
   brushPainting = false;
-  if (brushCurLine) {
-    brushOverlays.push(brushCurLine);
-    brushCurLine = null;
-  }
-  brushCurPts = [];
-  setStatus('修补：可继续涂抹，Enter 应用 / Esc 取消');
+  applyBrushStroke();
 });
 
-// 应用累积笔迹：一次性提交后端，替换零件（内容原位对齐）
-async function applyBrushStrokes() {
-  if (!brushTarget || !brushCanvas) return;
+// 应用当前一笔：提交后端，替换零件（内容原位对齐），一笔一步快照
+async function applyBrushStroke() {
+  if (!brushTarget || !brushCanvas || brushBusy) { clearBrushStroke(); return; }
   const group  = brushTarget;
   const partId = group.partId;
   const origLeft = group.left;
@@ -1693,8 +1885,9 @@ async function applyBrushStrokes() {
   // 导出笔迹为 PNG data-url（白色笔迹=涂抹区）
   const stroke_b64 = brushCanvas.toDataURL('image/png');
   const mode = document.getElementById('brush-mode').value;
-  clearBrushStrokes();
+  clearBrushStroke();
 
+  brushBusy = true;
   setStatus('修补处理中…');
   showProgress(0.5);
   try {
@@ -1719,21 +1912,26 @@ async function applyBrushStrokes() {
       const px = origLeft + (piece.frame_dx || 0) * gScale;
       const py = origTop  + (piece.frame_dy || 0) * gScale;
       await addPart(piece, px, py);
-      // 继承原零件缩放（绕左上角缩放，left/top 不动，对齐关系保持）
       const po = objById.get(piece.id);
-      if (po && gScale !== 1) {
-        po.set({ scaleX: gScale, scaleY: gScale });
-        po.setCoords();
+      if (po) {
+        // 继承原零件缩放（绕左上角缩放，left/top 不动，对齐关系保持）
+        if (gScale !== 1) { po.set({ scaleX: gScale, scaleY: gScale }); po.setCoords(); }
+        // 修补模式内新零件同样不可选中，且画笔光标保持在最上层
+        if (brushMode) { po.selectable = false; po.hasControls = false; }
       }
     }
 
     if (pageRect) canvas.sendToBack(pageRect);
+    if (brushCursor) canvas.bringToFront(brushCursor);
     canvas.requestRenderAll();
-    setStatus(`修补完成，产出 ${parts.length} 个零件`);
+    setStatus(parts.length > 1
+      ? `修补完成，分裂为 ${parts.length} 个零件（Ctrl+Z 撤销）`
+      : '修补完成（Ctrl+Z 撤销）');
     pushSnapshot();
   } catch (err) {
     setStatus('修补失败: ' + err.message);
   } finally {
+    brushBusy = false;
     hideProgress();
   }
 }

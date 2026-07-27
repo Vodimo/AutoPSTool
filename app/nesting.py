@@ -6,7 +6,9 @@ import shapely.prepared
 
 from app import border, geometry as g
 
-SIMPLIFY_TOLERANCE_PX = 8  # 碰撞多边形简化容差（像素）
+SIMPLIFY_TOLERANCE_PX = 4  # 碰撞多边形简化容差（像素）
+# 简化会使多边形内缩最多 tol，两件之间实际间距因此偏小最多 2*tol；
+# 碰撞缓冲时每件补回 tol/2*2=tol 的一半（见 _place），保证「间距」设定值基本精确。
 
 
 def _base_poly(part, offset_px: float, smooth_iters: int = 0, bleed_px: float = 0.0):
@@ -81,7 +83,9 @@ def _place(parts, offset_px: float, spacing_px: float, angle_steps: int,
             fw = fmaxx - fminx
             fh = fmaxy - fminy
             # 每角度只 buffer 一次；后续靠算术 + 平移
-            fp_buf = fp.buffer(spacing_px / 2.0, join_style=2)
+            # +tol/2：补偿 simplify 内缩，使两件实际间距 ≈ spacing 设定值
+            fp_buf = fp.buffer(spacing_px / 2.0 + SIMPLIFY_TOLERANCE_PX / 2.0,
+                               join_style=2)
             bminx, bminy, bmaxx, bmaxy = fp_buf.bounds
 
             max_y = max(1, int(page_h - fh) + 1)

@@ -2,6 +2,8 @@
 import math
 
 from shapely.geometry import Polygon, MultiPolygon
+from shapely.affinity import translate as _translate
+from shapely.ops import unary_union
 
 from app import vectorize as vz
 
@@ -75,12 +77,55 @@ def halfplane_polygon(plane, bleed_px: float) -> Polygon:
     return Polygon([p1, p2, p3, p4])
 
 
+def _largest_polygon(geom):
+    """从任意 shapely 结果中取面积最大的 Polygon；无则 None。"""
+    if isinstance(geom, Polygon):
+        return geom if not geom.is_empty else None
+    if isinstance(geom, MultiPolygon) and len(geom.geoms):
+        return max(geom.geoms, key=lambda g: g.area)
+    if hasattr(geom, "geoms"):
+        polys = [g for g in geom.geoms if isinstance(g, Polygon) and not g.is_empty]
+        if polys:
+            return max(polys, key=lambda g: g.area)
+    return None
+
+
+def clip_with_bleed(poly: Polygon, plane, bleed_px: float) -> Polygon:
+    """按切割平面裁剪刀模多边形，出血做成「矩形凸台」。
+
+    出血凸台 = 贴线切平后的块沿越线方向扫掠 bleed_px、再限制在切线~出血线
+    之间的带内。这样出血宽度独立于白边宽度（不再被白边"越线只剩 offset"
+    饱和），且切口两端是干净的直角——完全锋利。
+    """
+    p0 = _largest_polygon(poly.intersection(halfplane_polygon(plane, 0.0)))
+    if p0 is None:
+        return poly
+    if bleed_px <= 0:
+        return p0
+    x1, y1, x2, y2 = plane
+    dx, dy = x2 - x1, y2 - y1
+    length = math.hypot(dx, dy) or 1.0
+    nx, ny = -dy / length, dx / length      # 指向保留侧；越线方向 = -n
+    # 沿 -n 扫掠（分步平移并集近似，步长远小于块厚度）
+    steps = 3
+    sweep = unary_union([p0] + [
+        _translate(p0, -nx * bleed_px * k / steps, -ny * bleed_px * k / steps)
+        for k in range(1, steps + 1)
+    ])
+    # 带状区：切线与出血线之间（= 保留侧半平面取反 ∩ 出血半平面）
+    band = halfplane_polygon(plane, bleed_px).intersection(
+        halfplane_polygon([x2, y2, x1, y1], 0.0))
+    bulge = sweep.intersection(band)
+    merged = _largest_polygon(unary_union([p0, bulge]))
+    return merged if merged is not None else p0
+
+
 def dieline_polygon(outline_d: str, offset_px: float, smooth_iters: int = 0,
                     cut_planes=None, bleed_px: float = 0.0) -> Polygon:
     """主体轮廓向外缓冲 offset_px(圆角)，得到白边外缘=刀模多边形。
-    smooth_iters>0 时对结果外环做 Chaikin 平滑（消除轮廓简化留下的直边折线感）。
-    cut_planes 非空时逐个与半平面求交：切口保持平直，白边越线 bleed_px 作出血。
-    （先平滑后裁剪，保证切口直线不被平滑磨圆。）"""
+    smooth_iters>0 时：先按档位简化（合并轮廓细碎抖动成长边）再 Chaikin 切角，
+    档位越高越顺滑。cut_planes 非空时逐个裁剪：切口平直、出血为矩形凸台
+    （见 clip_with_bleed）。先平滑后裁剪，切口直线与直角不被平滑磨圆。"""
     ring = outer_polyline(outline_d)
     if len(ring) < 3:
         return Polygon()
@@ -91,16 +136,17 @@ def dieline_polygon(outline_d: str, offset_px: float, smooth_iters: int = 0,
     if not isinstance(grown, Polygon):
         return Polygon()
     if smooth_iters > 0:
+        # 档位越高简化越强：细碎抖动并成长边，Chaikin 再把长边交角切圆 → 大弧顺滑
+        # （容差与前端 rdpSimplify 保持一致）
+        simp = grown.simplify(0.8 + 0.6 * smooth_iters, preserve_topology=True)
+        if isinstance(simp, Polygon) and not simp.is_empty:
+            grown = simp
         sm = smooth_ring(list(grown.exterior.coords)[:-1], smooth_iters)
         cand = Polygon(sm)
         if cand.is_valid and not cand.is_empty:
             grown = cand
     for plane in (cut_planes or []):
-        clipped = grown.intersection(halfplane_polygon(plane, bleed_px))
-        if isinstance(clipped, MultiPolygon):
-            clipped = max(clipped.geoms, key=lambda g: g.area)
-        if isinstance(clipped, Polygon) and not clipped.is_empty:
-            grown = clipped
+        grown = clip_with_bleed(grown, plane, bleed_px)
     return grown
 
 
