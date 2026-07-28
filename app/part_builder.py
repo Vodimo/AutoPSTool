@@ -12,14 +12,8 @@ from app.models import Part
 SUBJECT_MARGIN = 60
 
 
-def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None,
-               art_mask=None) -> Part:
-    """把单个主体掩膜做成零件。subject_mask 为全图坐标 0/255。
-
-    art_mask：印刷素材掩膜（可选，同为全图坐标）。给定时主体帧尺寸按它决定、
-    subject_image 由它上色，而 subject_outline / 刀模仍来自 subject_mask。
-    切割块用它携带「越过切线的对侧素材」，从而出血区印的是延续的图像而非白边。
-    """
+def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None) -> Part:
+    """把单个主体掩膜做成零件。subject_mask 为全图坐标 0/255。"""
     if offset_mm is None:
         offset_mm = g.OFFSET_MM
     if part_id is None:
@@ -33,11 +27,6 @@ def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None,
                              cv2.BORDER_CONSTANT, value=(255, 255, 255))
     msk = cv2.copyMakeBorder(subject_mask, pad, pad, pad, pad,
                              cv2.BORDER_CONSTANT, value=0)
-    if art_mask is not None:
-        amsk = cv2.copyMakeBorder(art_mask, pad, pad, pad, pad,
-                                  cv2.BORDER_CONSTANT, value=0)
-    else:
-        amsk = msk
 
     # 膨胀 = 白边；得到刀模掩膜
     dieline = ch.dilate_mask(msk, offset_px)
@@ -69,35 +58,31 @@ def build_part(image_bgr, subject_mask, offset_mm=None, part_id=None,
     dieline_path = vz.trace_mask(crop_die)
 
     # 额外产出"主体帧(padded bbox)"：source_bgr / edit_mask / subject_image / subject_outline
-    # 主体帧 = 素材 bbox 外扩 SUBJECT_MARGIN 并 clamp 到 padded 图边界
-    # （用 amsk 定尺寸：切割块的出血素材越过切线，帧须容纳得下）
+    # 主体帧 = 主体 bbox 外扩 SUBJECT_MARGIN 并 clamp 到 padded 图边界
     M = SUBJECT_MARGIN
-    sx, sy, sw, sh = cv2.boundingRect(amsk)
+    sx, sy, sw, sh = cv2.boundingRect(msk)
     x0 = max(0, sx - M)
     y0 = max(0, sy - M)
     x1 = min(img.shape[1], sx + sw + M)
     y1 = min(img.shape[0], sy + sh + M)
     source_bgr = img[y0:y1, x0:x1].copy()      # BGR 全色（未掩膜）
-    edit_mask  = msk[y0:y1, x0:x1].copy()      # 0/255 真实主体掩膜，与 source_bgr 同帧
-    art_crop   = amsk[y0:y1, x0:x1].copy()     # 0/255 印刷素材掩膜（含出血素材）
+    edit_mask  = msk[y0:y1, x0:x1].copy()      # 0/255 掩膜，与 source_bgr 同帧
 
-    # subject_image：同帧 RGBA，印刷素材像素着色，其余透明
+    # subject_image：同帧 RGBA，主体像素着色，其余透明
     fh, fw = edit_mask.shape
     subject_image = np.zeros((fh, fw, 4), np.uint8)
     sb2, sg2, sr2 = cv2.split(source_bgr)
-    sm = art_crop > 0
+    sm = edit_mask > 0
     subject_image[sm, 0] = sr2[sm]
     subject_image[sm, 1] = sg2[sm]
     subject_image[sm, 2] = sb2[sm]
     subject_image[sm, 3] = 255
-    # 轮廓（刀模来源）只看真实主体，不含出血素材
     subject_outline = vz.trace_mask(edit_mask)
 
     return Part(id=part_id, image_layer=layer, mask=crop_die,
                 contour=contour, dieline_path=dieline_path,
                 subject_image=subject_image, subject_outline=subject_outline,
                 source_bgr=source_bgr, edit_mask=edit_mask,
-                art_mask=(art_crop if art_mask is not None else None),
                 frame_ox=x0 - pad, frame_oy=y0 - pad)
 
 
@@ -154,16 +139,10 @@ def apply_brush(part, stroke_mask, mode) -> list:
 
     em = ch.clean_edges(em)
     comps = ch.separate_components(em, min_area=800)
-    art0 = part.art_mask
     out = []
     for c in comps:
         # 复用 build_part：source_bgr 帧 + 该连通分量的掩膜，重新推导白边/刀模/参数化
-        art_c = None
-        if art0 is not None:
-            # 保留原有出血素材（限制在本分量邻域内），修补不应丢掉切口出血
-            near = _dilate_reach(c, _max_bleed_px() + 2)
-            art_c = cv2.bitwise_or(c, cv2.bitwise_and(art0, near))
-        newp = build_part(part.source_bgr, c, art_mask=art_c)
+        newp = build_part(part.source_bgr, c)
         fdx, fdy = newp.frame_ox, newp.frame_oy
         # 切割块修补后保留其切割平面（换算到新帧），切口白边不还原
         if part.cut_planes:
@@ -173,24 +152,12 @@ def apply_brush(part, stroke_mask, mode) -> list:
     return out
 
 
-def _max_bleed_px() -> int:
-    return g.mm_to_px(g.MAX_BLEED_MM)
-
-
-def _dilate_reach(mask, radius_px: int):
-    """掩膜向外膨胀 radius_px，用于「取该分量附近的素材」。"""
-    return ch.dilate_mask(mask, max(1, int(radius_px)))
-
-
 def cut_part_parametric(part, p1, p2) -> list:
     """参数化切割：沿 p1->p2（主体帧坐标）把参数化零件切成若干参数化块。
 
-    刀模语义（印刷标准）：**刀模线正好落在切线上**（切口平直、无白边），
-    而**图像越过刀模线继续延伸出血**——出血区印的是对侧延续的画面，
-    裁切偏移时不会露白。故每块产出两套掩膜：
-      - edit_mask：沿切线平直截断的真实主体 → 刀模/轮廓来源
-      - art_mask ：外加越线最多 MAX_BLEED 的对侧素材 → subject_image 上色来源
-    出血值改动只需在渲染时改裁剪深度，无需重切。
+    主体掩膜沿切线平直截断，切割平面记录在 cut_planes 上；渲染时刀模
+    = buffer(outline, offset) ∩ 半平面，故**刀模线正好落在切割线上**，
+    切口平直、两端锋利，且白边宽度仍随全局设定实时可调。
 
     Returns:
         [(Part, (frame_dx, frame_dy)), ...]：每块为新参数化零件，
@@ -198,7 +165,6 @@ def cut_part_parametric(part, p1, p2) -> list:
         某侧无有效主体时该侧无块；切线不穿过主体时可能只返回一块。
     """
     em = part.edit_mask
-    art0 = part.art_mask if part.art_mask is not None else em
     h, w = em.shape
     x1, y1 = float(p1[0]), float(p1[1])
     x2, y2 = float(p2[0]), float(p2[1])
@@ -209,24 +175,17 @@ def cut_part_parametric(part, p1, p2) -> list:
 
     Y, X = np.indices((h, w))
     dist = (dx * (Y - y1) - dy * (X - x1)) / length
-    maxb = _max_bleed_px()
 
     out = []
     # dist>0 侧保留线段方向 (p1→p2)；dist<0 侧取反向 (p2→p1)，使各自保留侧均为 dist>0 约定
-    for side_mask, art_side, plane in (
-        ((dist >= 0), (dist >= -maxb), [x1, y1, x2, y2]),
-        ((dist <= 0), (dist <= maxb), [x2, y2, x1, y1]),
+    for side_mask, plane in (
+        ((dist >= 0), [x1, y1, x2, y2]),
+        ((dist <= 0), [x2, y2, x1, y1]),
     ):
         m = cv2.bitwise_and(em, side_mask.astype(np.uint8) * 255)
         comps = ch.separate_components(m, min_area=800)
-        art_side_u8 = art_side.astype(np.uint8) * 255
         for c in comps:
-            # 本块的印刷素材 = 自身 + 越线 maxb 内的素材（限制在本分量邻域，
-            # 避免把同侧其它分量的画面卷进来）
-            near = _dilate_reach(c, maxb + 2)
-            art_c = cv2.bitwise_or(
-                c, cv2.bitwise_and(cv2.bitwise_and(art0, art_side_u8), near))
-            newp = build_part(part.source_bgr, c, art_mask=art_c)
+            newp = build_part(part.source_bgr, c)
             fdx, fdy = newp.frame_ox, newp.frame_oy
             # 累积切割平面并换算到新主体帧
             planes = [[px1 - fdx, py1 - fdy, px2 - fdx, py2 - fdy]
@@ -238,12 +197,8 @@ def cut_part_parametric(part, p1, p2) -> list:
     return out
 
 
-def cut_part(part, p1, p2, bleed_mm=None):
-    """沿 p1->p2 把零件切成两块，切口两侧重叠 bleed，切口平直。"""
-    if bleed_mm is None:
-        bleed_mm = g.BLEED_MM
-    bleed_px = g.mm_to_px(bleed_mm)
-
+def cut_part(part, p1, p2):
+    """沿 p1->p2 把固定零件切成两块，切口平直。"""
     h, w = part.mask.shape
     x1, y1 = p1
     x2, y2 = p2
@@ -257,8 +212,8 @@ def cut_part(part, p1, p2, bleed_mm=None):
     # 有向距离：>0 一侧，<0 另一侧
     dist = (dx * (Y - y1) - dy * (X - x1)) / length
 
-    side_a = (dist >= -bleed_px).astype(np.uint8) * 255   # A 含 A 面 + 越界 bleed
-    side_b = (dist <= bleed_px).astype(np.uint8) * 255    # B 含 B 面 + 越界 bleed
+    side_a = (dist >= 0).astype(np.uint8) * 255
+    side_b = (dist <= 0).astype(np.uint8) * 255
 
     die_a = cv2.bitwise_and(part.mask, side_a)
     die_b = cv2.bitwise_and(part.mask, side_b)

@@ -28,3 +28,6 @@ Thumbs.db
 
 # SDD 脚手架
 .superpowers/
+
+# 用户本地临时副本（避免误提交）
+*副本*

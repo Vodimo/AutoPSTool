@@ -45,13 +45,8 @@
 
     <div class="tool-group">
       <span class="group-label">工具</span>
-      <button id="btn-cut" title="切割模式（C）：点选目标零件，拖直线，Enter 确认 / Esc 取消">✂️ 切割</button>
-      <label title="切口两侧的重叠出血量（切割块实时生效）">出血
-        <input type="range" id="bleed-range" min="0" max="100" step="1" value="15">
-        <input type="number" id="bleed-num" min="0" step="0.1" value="1.5">
-        <select id="bleed-unit"><option value="mm">mm</option><option value="px">px</option></select>
-      </label>
-      <button id="btn-brush" title="修补画笔（B）：在零件上涂抹修正抠图，Enter 应用 / Esc 取消">🖌️ 修补</button>
+      <button id="btn-cut" title="切割模式（C）：点选目标零件，两击画线，Enter 确认 / Esc 取消">✂️ 切割</button>
+      <button id="btn-brush" title="修补画笔（B）：在零件上涂抹修正抠图，涂抹即时生效">🖌️ 修补</button>
       <select id="brush-mode" title="加=补涂主体，擦=擦除主体">
         <option value="add">加</option><option value="erase">擦</option>
       </select>

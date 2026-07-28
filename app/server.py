@@ -1,4 +1,4 @@
-"""Flask 后端：托管前端、抠图/切割/排版/导出 API、内存会话、浏览器自启。"""
+﻿"""Flask 后端：托管前端、抠图/切割/排版/导出 API、内存会话、浏览器自启。"""
 import os
 import io
 import base64
@@ -17,7 +17,6 @@ app = Flask(__name__, static_folder=None)
 
 PARTS = {}  # id -> Part（单用户本地工具，内存会话足够）
 OFFSET_MM = g.OFFSET_MM  # 全局白边(会话级)，前端 /api/set_border 同步
-BLEED_MM = g.BLEED_MM    # 全局切割出血(会话级)，前端 /api/set_bleed 同步
 PAGE_W_MM = 210           # 全局纸张宽度(mm)，前端 /api/set_page 同步
 PAGE_H_MM = 297           # 全局纸张高度(mm)
 SMOOTH_ITERS = 0          # 全局描边平滑迭代数(0=不平滑)，前端 /api/set_smooth 同步
@@ -95,18 +94,6 @@ def api_segment():
     return jsonify({"parts": out})
 
 
-@app.route("/api/set_bleed", methods=["POST"])
-def api_set_bleed():
-    """设置全局切割出血量（毫米）。必须大于 0。"""
-    global BLEED_MM
-    d = _require_json("bleed_mm")
-    val = float(d["bleed_mm"])
-    if val <= 0:
-        abort(400, description="bleed_mm 必须大于 0")
-    BLEED_MM = val
-    return jsonify({"ok": True, "bleed_mm": BLEED_MM})
-
-
 @app.route("/api/cut", methods=["POST"])
 def api_cut():
     """切割零件：commit=false 仅预览（不改 PARTS），commit=true 两块入库（原件保留，供撤销重建）。
@@ -123,7 +110,7 @@ def api_cut():
     x1, y1 = float(d["x1"]), float(d["y1"])
     x2, y2 = float(d["x2"]), float(d["y2"])
     if part.subject_outline:
-        # 参数化路线：主体沿线截断，块仍为参数化零件（白边/出血/平滑保持实时可调）
+        # 参数化路线：主体沿线截断，块仍为参数化零件（白边/平滑保持实时可调）
         results = part_builder.cut_part_parametric(part, (x1, y1), (x2, y2))
         if commit:
             for p, _ in results:
@@ -137,7 +124,7 @@ def api_cut():
             out.append(item)
         return jsonify({"parts": out})
     # 固定零件（历史遗留）仍走像素切割
-    a, b = part_builder.cut_part(part, (x1, y1), (x2, y2), bleed_mm=BLEED_MM)
+    a, b = part_builder.cut_part(part, (x1, y1), (x2, y2))
     pieces = [x for x in (a, b) if x is not None]
     if commit:
         for piece in pieces:
@@ -207,7 +194,7 @@ NEST_JOB = {"running": False, "progress": 1.0, "positions": None, "error": None,
 
 
 def _run_nest(parts, spacing_mm, angle_steps, uniform_scale, offset_mm, page_px,
-              smooth_iters, bleed_mm):
+              smooth_iters):
     """后台线程执行排版，进度写入 NEST_JOB。partial 为已放置零件的中间位置，
     前端轮询时实时挪动，让用户看到排版进行的过程。"""
     def cb(done, total):
@@ -227,7 +214,6 @@ def _run_nest(parts, spacing_mm, angle_steps, uniform_scale, offset_mm, page_px,
             page_px=page_px,
             progress_cb=cb,
             smooth_iters=smooth_iters,
-            bleed_mm=bleed_mm,
         )
         NEST_JOB["positions"] = [
             {"id": p.id, "cx": p.cx, "cy": p.cy, "angle": p.rotation, "scale": p.scale}
@@ -270,7 +256,7 @@ def api_nest():
         threading.Thread(
             target=_run_nest,
             args=(parts, spacing_mm, angle_steps, uniform_scale, OFFSET_MM, page_px,
-                  SMOOTH_ITERS, BLEED_MM),
+                  SMOOTH_ITERS),
             daemon=True,
         ).start()
         return jsonify({"job": True})
@@ -283,7 +269,6 @@ def api_nest():
         uniform_scale=uniform_scale,
         page_px=page_px,
         smooth_iters=SMOOTH_ITERS,
-        bleed_mm=BLEED_MM,
     )
 
     return jsonify({
@@ -367,7 +352,7 @@ def api_export():
         parts.append(p)
     img = exporter.render_png(parts, offset_mm=OFFSET_MM,
                                page_px=(g.mm_to_px(PAGE_W_MM), g.mm_to_px(PAGE_H_MM)),
-                               smooth_iters=SMOOTH_ITERS, bleed_mm=BLEED_MM)
+                               smooth_iters=SMOOTH_ITERS)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)

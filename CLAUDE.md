@@ -33,11 +33,11 @@ Flask 启动后自动打开 `http://127.0.0.1:5000`。前端由 Flask 同源托�
 
 | 模块 | 职责 |
 |---|---|
-| `geometry.py` | 物理常量单一来源：`PIXEL_RATIO=10`（1mm=10px）、A4=2100×2970px、`OFFSET_MM`/`BLEED_MM`/`PADDING_MM`/`DIECUT_RGB` |
+| `geometry.py` | 物理常量单一来源：`PIXEL_RATIO=10`（1mm=10px）、A4=2100×2970px、`OFFSET_MM`/`PADDING_MM`/`DIECUT_RGB` |
 | `cv_helpers.py` | CV 工具函数：`fill_holes` / `separate_components` / `clean_edges` / `dilate_mask` |
 | `segmentation.py` | 引擎 C：rembg（模型 **u2netp**）→ `clean_edges` → `separate_components` → `fill_holes`；`segment_subjects(image_bgr)` 返回多主体 mask 列表 |
 | `models.py` | `Part` dataclass：`id`, `image_layer`（RGBA ndarray）, `mask`, `contour`, `x`, `y`, `scale`, `rotation`；计算属性 `w`/`h` |
-| `part_builder.py` | `build_part(image_bgr, subject_mask, offset_mm, part_id)` 白边膨胀+刀模轮廓；`cut_part(part, p1, p2, bleed_mm)` SDF 半平面切割（切口重叠 = 印刷出血） |
+| `part_builder.py` | `build_part(image_bgr, subject_mask, offset_mm, part_id)` 白边膨胀+刀模轮廓；`cut_part_parametric(part, p1, p2)` 沿切线截断主体并记录 `cut_planes`（渲染时刀模与半平面求交 → 刀模线正好落在切割线上，白边仍实时可调）；`apply_brush` 画笔加/擦 |
 | `nesting.py` | Bottom-Left-Fill 紧凑排版；轮廓先 Shapely 简化（`SIMPLIFY_TOLERANCE_PX`）加速碰撞检测 |
 | `exporter.py` | `render_png(parts)` → 单张 A4 PNG：图像层 + 洋红（`#FF00FF`）刀模线 |
 | `server.py` | Flask 托管前端（`/`）+ 静态文件 + 内存 Part 会话 + API：`/api/segment|cut|nest|export`；`main()` 自动打开浏览器；监听 `127.0.0.1:5000` |

@@ -139,22 +139,6 @@ def _make_parametric_part(pid="cuttest"):
     return part
 
 
-def test_set_bleed():
-    """POST /api/set_bleed 更新全局 BLEED_MM；非正数返回 400。"""
-    client = server.app.test_client()
-    # 正常更新
-    r = client.post("/api/set_bleed", json={"bleed_mm": 2.0})
-    assert r.status_code == 200, f"期望 200，实际 {r.status_code}"
-    data = r.get_json()
-    assert data["ok"] is True
-    assert server.BLEED_MM == 2.0
-    # 非正数 → 400
-    r2 = client.post("/api/set_bleed", json={"bleed_mm": 0})
-    assert r2.status_code == 400, f"bleed_mm=0 应返回 400，实际 {r2.status_code}"
-    r3 = client.post("/api/set_bleed", json={"bleed_mm": -1})
-    assert r3.status_code == 400, f"bleed_mm=-1 应返回 400，实际 {r3.status_code}"
-
-
 def test_brush_endpoint():
     """POST /api/brush：erase 笔迹→200，返回 parts，旧 id 保留在 PARTS。"""
     part = _make_parametric_part("brushtest")

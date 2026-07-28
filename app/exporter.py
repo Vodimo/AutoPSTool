@@ -21,8 +21,8 @@ def _draw_polyline(draw, pts, fill, width=2):
 TILE_PAD = 2
 
 
-def _build_tile(part, offset_px: float, smooth_iters: int = 0,
-                bleed_px: float = 0.0) -> tuple["Image.Image", float, float]:
+def _build_tile(part, offset_px: float,
+                smooth_iters: int = 0) -> tuple["Image.Image", float, float]:
     """构建未旋转的 RGBA tile，返回 (tile, content_w, content_h)。
 
     参数化零件：白多边形 + 主体图 + 洋红刀模线，以 poly 局部坐标为基准。
@@ -34,30 +34,23 @@ def _build_tile(part, offset_px: float, smooth_iters: int = 0,
 
     if part.subject_outline:
         # —— 参数化零件 ——
-        # 印刷区 = 刀模区 + 越过切线的出血带；刀模区 = 刀模线所在轮廓（切线处 bleed=0）
-        print_poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters,
-                                            cut_planes=part.cut_planes, bleed_px=bleed_px)
-        if print_poly.is_empty:
+        poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters,
+                                      cut_planes=part.cut_planes)
+        if poly.is_empty:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0)), 1.0, 1.0
-        die_poly = border.dieline_polygon(part.subject_outline, offset_px, smooth_iters,
-                                          cut_planes=part.cut_planes, bleed_px=0.0)
-        minx, miny, maxx, maxy = print_poly.bounds
+        minx, miny, maxx, maxy = poly.bounds
         cw = max(1, math.ceil((maxx - minx) * s))
         ch = max(1, math.ceil((maxy - miny) * s))
         tile = Image.new("RGBA", (cw + 2 * TILE_PAD, ch + 2 * TILE_PAD), (0, 0, 0, 0))
         draw = ImageDraw.Draw(tile)
 
-        def _local(poly):
-            return [((px - minx) * s + TILE_PAD, (py - miny) * s + TILE_PAD)
-                    for (px, py) in poly.exterior.coords]
-
-        # 白底多边形铺满整个印刷区（含出血带）
-        print_pts = _local(print_poly)
-        if len(print_pts) >= 3:
-            draw.polygon(print_pts, fill=(255, 255, 255, 255))
+        # 白底多边形（tile 局部坐标）
+        local_pts = [((px - minx) * s + TILE_PAD, (py - miny) * s + TILE_PAD)
+                     for (px, py) in poly.exterior.coords]
+        if len(local_pts) >= 3:
+            draw.polygon(local_pts, fill=(255, 255, 255, 255))
 
         # 贴主体图：主体局部原点(0,0) 对应 poly 内位置 = (-minx,-miny)
-        # subject_image 含最多 MAX_BLEED 的越线素材，多余部分随后按印刷区裁掉
         subj = Image.fromarray(part.subject_image, mode="RGBA")
         if s != 1.0:
             subj = subj.resize(
@@ -68,15 +61,14 @@ def _build_tile(part, offset_px: float, smooth_iters: int = 0,
         sy_off = int(round((0 - miny) * s)) + TILE_PAD
         tile.alpha_composite(subj, (sx_off, sy_off))
 
-        # 按印刷区裁剪：出血素材只保留当前出血深度
-        if len(print_pts) >= 3:
+        # 切割块：主体图沿切线是像素级截断，可能溢出刀模区，按刀模区裁掉
+        if part.cut_planes and len(local_pts) >= 3:
             region = Image.new("L", tile.size, 0)
-            ImageDraw.Draw(region).polygon(print_pts, fill=255)
+            ImageDraw.Draw(region).polygon(local_pts, fill=255)
             tile.putalpha(ImageChops.multiply(tile.getchannel("A"), region))
 
-        # 洋红刀模线：画在刀模轮廓上（切口处 = 切割线本身，图像越线出血在其外侧）
-        if not die_poly.is_empty:
-            _draw_polyline(draw, _local(die_poly), g.DIECUT_RGB + (255,))
+        # 洋红刀模线（切口处 = 切割线本身）
+        _draw_polyline(draw, local_pts, g.DIECUT_RGB + (255,))
         return tile, float(cw), float(ch)
 
     # —— 固定零件 ——
@@ -101,21 +93,17 @@ def _build_tile(part, offset_px: float, smooth_iters: int = 0,
     return tile, float(layer.width), float(layer.height)
 
 
-def render_png(parts, offset_mm=None, page_px=None, smooth_iters=0, bleed_mm=None):
+def render_png(parts, offset_mm=None, page_px=None, smooth_iters=0):
     """RGBA 画布：每个零件渲染 tile → 按 rotation 旋转 → 居中粘贴。
     page_px=(宽,高) 指定输出分辨率，默认 A4 (2100×2970)。
     part.cx/cy 给定则以其为中心；否则以 (x + tile_w0/2, y + tile_h0/2) 为中心（向后兼容）。
     smooth_iters: 刀模 Chaikin 平滑迭代数（与前端画布一致）。
-    bleed_mm: 切割块的越线出血量（作用于 cut_planes 裁剪边界）。
     """
     if offset_mm is None:
         offset_mm = g.OFFSET_MM
-    if bleed_mm is None:
-        bleed_mm = g.BLEED_MM
     if page_px is None:
         page_px = (g.A4_WIDTH_PX, g.A4_HEIGHT_PX)
     offset_px = g.mm_to_px(offset_mm)
-    bleed_px = g.mm_to_px(bleed_mm)
     canvas = Image.new("RGBA", page_px, (255, 255, 255, 255))
 
     for part in parts:
@@ -126,7 +114,7 @@ def render_png(parts, offset_mm=None, page_px=None, smooth_iters=0, bleed_mm=Non
         elif part.x < 0 or part.y < 0:
             continue
 
-        tile, tile_w0, tile_h0 = _build_tile(part, offset_px, smooth_iters, bleed_px)
+        tile, tile_w0, tile_h0 = _build_tile(part, offset_px, smooth_iters)
         if tile.width <= 1 and tile.height <= 1:
             continue
 

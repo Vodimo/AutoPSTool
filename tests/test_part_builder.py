@@ -1,4 +1,4 @@
-import numpy as np
+﻿import numpy as np
 import cv2
 from app import part_builder as pb
 from app.models import Part
@@ -45,7 +45,7 @@ def test_cut_part_makes_two_overlapping_parts():
     part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
     # 竖直切一刀（从上到下）
     midx = part.w // 2
-    a, b = pb.cut_part(part, (midx, 0), (midx, part.h), bleed_mm=1.5)
+    a, b = pb.cut_part(part, (midx, 0), (midx, part.h))
     # 两块各自有内容
     assert a.image_layer[:, :, 3].max() == 255
     assert b.image_layer[:, :, 3].max() == 255
@@ -66,7 +66,7 @@ def test_cut_part_zero_length_line_no_cut():
     img, mask = _single_subject()
     part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
     midx = part.w // 2
-    a, b = pb.cut_part(part, (midx, 10), (midx, 10), bleed_mm=1.5)
+    a, b = pb.cut_part(part, (midx, 10), (midx, 10))
     assert a is part        # 原零件原样返回
     assert b is None        # 没有第二块
 
@@ -82,7 +82,7 @@ def test_cut_pieces_have_vector_dieline():
     img, mask = _single_subject()
     part = pb.build_part(img, mask, offset_mm=2.0, part_id="p1")
     midx = part.w // 2
-    a, b = pb.cut_part(part, (midx, 0), (midx, part.h), bleed_mm=1.5)
+    a, b = pb.cut_part(part, (midx, 0), (midx, part.h))
     assert a.dieline_path and b.dieline_path
 
 
@@ -162,8 +162,8 @@ def test_apply_brush_add_grows():
 
 
 def test_cut_parametric_pieces_and_die_geometry():
-    """参数化切割：竖切过圆心 → 两块参数化零件；刀模在切线处平直截断且越线出血；
-    白边加大时切口边界不变（白边/出血实时可调的几何基础）。"""
+    """参数化切割：竖切过圆心 → 两块参数化零件；刀模线正好落在切割线上（切口平直），
+    白边加大时切口边界不变（白边实时可调的几何基础）。"""
     from app import border, geometry as g
     img, mask = _single_subject()
     part = pb.build_part(img, mask, offset_mm=2.0, part_id="pc")
@@ -173,55 +173,45 @@ def test_cut_parametric_pieces_and_die_geometry():
     results = pb.cut_part_parametric(part, (mid, 0), (mid, fh))
     assert len(results) == 2, f"竖切过心应得两块，实际 {len(results)}"
 
-    bleed_px = g.mm_to_px(1.5)
     offset_px = g.mm_to_px(2.0)
     for piece, (fdx, fdy) in results:
         assert piece.subject_outline, "切块应仍为参数化零件"
         assert piece.cut_planes and len(piece.cut_planes) == 1, "切块应带 1 个切割平面"
         die = border.dieline_polygon(piece.subject_outline, offset_px,
-                                      cut_planes=piece.cut_planes, bleed_px=bleed_px)
+                                     cut_planes=piece.cut_planes)
         assert not die.is_empty
-        # 切线在新帧的 x 坐标
+        # 切线在新帧的 x 坐标；刀模在切口侧应恰好止于切线（不越线、也不留白边）
         line_x = mid - fdx
         minx, _, maxx, _ = die.bounds
-        # 刀模应越过切线约 bleed_px（±2px 容差），不会像普通白边那样鼓出 offset_px
-        over = max(maxx - line_x, line_x - minx)   # 越线深度取决于块在哪一侧
-        # 一侧是主体侧(远大于 bleed)，另一侧是切口侧
-        cut_side_over = min(maxx - line_x, line_x - minx) * -1 \
-            if (maxx < line_x or minx > line_x) else \
-            (maxx - line_x if (line_x - minx) > (maxx - line_x) else line_x - minx)
-        assert abs(cut_side_over - bleed_px) <= 2, \
-            f"切口越线量应≈出血 {bleed_px}px，实际 {cut_side_over:.1f}px"
+        cut_side_over = min(abs(maxx - line_x), abs(line_x - minx))
+        assert cut_side_over <= 2, \
+            f"刀模线应落在切割线上，实际越线/退让 {cut_side_over:.1f}px"
 
-        # 白边加大 → 主体侧扩张、切口边界仍= line±bleed
+        # 白边加大 → 主体侧扩张，切口边界仍在切线上
         die_big = border.dieline_polygon(piece.subject_outline, g.mm_to_px(5.0),
-                                          cut_planes=piece.cut_planes, bleed_px=bleed_px)
+                                         cut_planes=piece.cut_planes)
         b0, b1 = die.bounds, die_big.bounds
         assert die_big.area > die.area, "白边加大刀模应变大（白边实时可调）"
-        # 切口侧边界位置不随白边变化
         if maxx - line_x < line_x - minx:   # 切口在右侧（保留左半）
             assert abs(b1[2] - b0[2]) <= 2, "切口边界不应随白边变化"
         else:
             assert abs(b1[0] - b0[0]) <= 2, "切口边界不应随白边变化"
 
-    # 两块刀模映射回原帧后应有约 2*bleed 的重叠带（印刷出血）
+    # 两块刀模映射回原帧后应彼此不重叠（切口贴合，无出血重叠带）
     (pa, (adx, ady)), (pb_, (bdx, bdy)) = results
     import shapely.affinity
     da = shapely.affinity.translate(
         border.dieline_polygon(pa.subject_outline, offset_px,
-                               cut_planes=pa.cut_planes, bleed_px=bleed_px), adx, ady)
+                               cut_planes=pa.cut_planes), adx, ady)
     db = shapely.affinity.translate(
         border.dieline_polygon(pb_.subject_outline, offset_px,
-                               cut_planes=pb_.cut_planes, bleed_px=bleed_px), bdx, bdy)
-    inter = da.intersection(db)
-    assert not inter.is_empty, "两块刀模应有出血重叠带"
-    iw = inter.bounds[2] - inter.bounds[0]
-    assert abs(iw - 2 * bleed_px) <= 4, f"重叠带宽应≈2×出血={2*bleed_px}px，实际 {iw:.1f}px"
+                               cut_planes=pb_.cut_planes), bdx, bdy)
+    assert da.intersection(db).area <= 4.0, "两块刀模应沿切线贴合，不重叠"
 
 
-def test_cut_bleed_is_artwork_not_border():
-    """切割语义回归：刀模线固定在切割线上，出血区印的是延续的图像而非白边。"""
-    from app import border, geometry as gg, exporter
+def test_cut_die_is_flat_at_line():
+    """切口渲染回归：刀模线外无任何内容（无出血、无白边溢出），切口平直。"""
+    from app import geometry as gg, exporter
     img = np.full((400, 400, 3), 255, np.uint8)
     cv2.circle(img, (200, 200), 130, (200, 120, 0), -1)      # 蓝色圆盘
     mask = np.zeros((400, 400), np.uint8)
@@ -233,48 +223,19 @@ def test_cut_bleed_is_artwork_not_border():
     assert len(pieces) == 2
     piece = pieces[0][0]
 
-    # 1) 印刷素材越过切线（供出血），真实主体仍截断在切线
-    assert piece.art_mask is not None, "切割块应带印刷素材掩膜"
-    em_x = np.where(piece.edit_mask.any(axis=0))[0]
-    am_x = np.where(piece.art_mask.any(axis=0))[0]
-    assert am_x.max() - em_x.max() >= gg.mm_to_px(gg.MAX_BLEED_MM) - 2, \
-        "印刷素材应越过切线约 MAX_BLEED"
-
-    # 2) 刀模多边形不随出血变化（刀模线就在切割线上）
-    off = gg.mm_to_px(2.0)
-    d0 = border.dieline_polygon(piece.subject_outline, off, cut_planes=piece.cut_planes,
-                                bleed_px=0)
-    for bleed_mm in (3.0, 6.0):
-        d = border.dieline_polygon(piece.subject_outline, off,
-                                   cut_planes=piece.cut_planes, bleed_px=0)
-        assert abs(d.bounds[2] - d0.bounds[2]) < 1e-6, "刀模轮廓不应随出血移动"
-
-    # 3) 渲染：刀模线外侧是主体色（出血带），且随出血线性加宽
-    def bleed_band_px(bleed_mm):
-        tile = exporter._build_tile(piece, off, 0, gg.mm_to_px(bleed_mm))[0]
-        arr = np.array(tile.convert("RGBA"))
-        row = arr[tile.height // 2]
-        die_x = max(i for i, px in enumerate(row)
-                    if px[3] > 128 and px[0] > 200 and px[1] < 60 and px[2] > 200)
-        # 刀模线右侧的不透明像素数 = 出血带宽度
-        return sum(1 for px in row[die_x + 1:] if px[3] > 128)
-
-    b0, b3, b6 = bleed_band_px(0.0), bleed_band_px(3.0), bleed_band_px(6.0)
-    assert b0 <= 2, f"出血 0 时刀模线外不应有内容，实际 {b0}px"
-    assert 25 <= b3 <= 35, f"出血 3mm 应约 30px，实际 {b3}px"
-    assert 55 <= b6 <= 65, f"出血 6mm 应约 60px，实际 {b6}px"
-
-    # 4) 出血带内容是主体色（蓝），不是白边
-    tile = exporter._build_tile(piece, off, 0, gg.mm_to_px(3.0))[0]
+    tile = exporter._build_tile(piece, gg.mm_to_px(2.0), 0)[0]
     arr = np.array(tile.convert("RGBA"))
     row = arr[tile.height // 2]
+    # 最右侧的洋红刀模线之后不应再有不透明像素（出血已移除）
     die_x = max(i for i, px in enumerate(row)
                 if px[3] > 128 and px[0] > 200 and px[1] < 60 and px[2] > 200)
-    band = [px for px in row[die_x + 3:] if px[3] > 128]
-    assert band, "出血带应有内容"
-    blue = sum(1 for px in band if px[2] > 120 and px[0] < 120)
-    assert blue > 0.8 * len(band), \
-        f"出血带应是延续的主体画面, 实际仅 {blue}/{len(band)} 为主体色"
+    beyond = sum(1 for px in row[die_x + 1:] if px[3] > 128)
+    assert beyond <= 2, f"刀模线外不应有内容，实际 {beyond}px"
+
+    # 切口侧的主体色应一直延伸到刀模线（切口无白边）
+    near = row[die_x - 6:die_x - 1]
+    blue = sum(1 for px in near if px[3] > 128 and px[2] > 120 and px[0] < 120)
+    assert blue >= 3, "切口处应是主体画面直抵刀模线，不应有白边"
 
 
 def test_materialize_parametric_then_cut():
@@ -287,7 +248,7 @@ def test_materialize_parametric_then_cut():
     mp = pb.materialize_parametric(p, offset_mm=2.0)
     assert mp.mask is not None and mp.image_layer is not None
     # 切割实体化后的零件
-    a, b = pb.cut_part(mp, (mp.w // 2, 0), (mp.w // 2, mp.h), bleed_mm=1.5)
+    a, b = pb.cut_part(mp, (mp.w // 2, 0), (mp.w // 2, mp.h))
     # 两块均非空，各有刀模路径
     assert a is not None and b is not None
     assert a.dieline_path and b.dieline_path
